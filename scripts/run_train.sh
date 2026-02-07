@@ -2,8 +2,9 @@
 # DyGenePT Training Script
 #
 # Usage:
-#   bash scripts/run_train.sh
-#   bash scripts/run_train.sh --config configs/custom.yaml
+#   bash scripts/run_train.sh                              # 8-GPU DDP (default)
+#   bash scripts/run_train.sh --config configs/custom.yaml # custom config
+#   NGPU=1 bash scripts/run_train.sh                       # single GPU
 #
 # Prerequisites:
 #   - Run precomputation first: bash scripts/run_precompute.sh
@@ -33,9 +34,20 @@ if [ ! -f "data/gene_facet_embeddings.pt" ]; then
     exit 1
 fi
 
-# Run training
-python -m src.train \
-    --config configs/default.yaml \
-    "$@"
+# Number of GPUs (default: 8, override with NGPU=N)
+NGPU=${NGPU:-8}
+
+if [ "$NGPU" -gt 1 ]; then
+    echo "Launching DDP training on $NGPU GPUs..."
+    torchrun --standalone --nproc_per_node="$NGPU" \
+        -m src.train \
+        --config configs/default.yaml \
+        "$@"
+else
+    echo "Launching single-GPU training..."
+    python -m src.train \
+        --config configs/default.yaml \
+        "$@"
+fi
 
 echo "=== Training finished ==="

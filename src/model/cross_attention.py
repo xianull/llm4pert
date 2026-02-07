@@ -59,9 +59,12 @@ class FacetCrossAttention(nn.Module):
             dynamic_emb:       (B, P, D)          context-aware gene embeddings
             attention_weights: (B, P, H, K)       sparse weights for interpretability
         """
-        B, P, K, D = gene_facets.shape
-        H = self.num_heads
-        d = self.head_dim
+        B = gene_facets.size(0)
+        P = gene_facets.size(1)
+        n_facets = gene_facets.size(2)
+        D = gene_facets.size(3)
+        H = int(self.num_heads)
+        d = int(self.head_dim)
 
         # --- Q from cell query ---
         # (B, D) -> (B, D) -> (B, H, 1, d)
@@ -69,8 +72,8 @@ class FacetCrossAttention(nn.Module):
 
         # --- K, V from gene facets ---
         # (B, P, K, D) -> (B, P, K, D) -> (B, P, K, H, d) -> (B, P, H, K, d)
-        K = self.W_K(gene_facets).view(B, P, K, H, d).permute(0, 1, 3, 2, 4)
-        V = self.W_V(gene_facets).view(B, P, K, H, d).permute(0, 1, 3, 2, 4)
+        K = self.W_K(gene_facets).view(B, P, n_facets, H, d).permute(0, 1, 3, 2, 4)
+        V = self.W_V(gene_facets).view(B, P, n_facets, H, d).permute(0, 1, 3, 2, 4)
 
         # --- Attention scores ---
         # Q: (B, H, 1, d) -> expand to (B, P, H, 1, d)
