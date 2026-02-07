@@ -1,0 +1,7 @@
+.claude
+checkpoints
+data
+__pycache__
+wandb
+outputs
+model

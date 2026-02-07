@@ -1,0 +1,125 @@
+# DyGenePT Configuration — Replogle K562 Essential
+# For fair comparison with LangPert (ICLR 2025 MLGenX)
+#
+# Usage:
+#   python -m src.train --config configs/replogle_k562.yaml
+#   python -m src.train_cv --config configs/replogle_k562.yaml  # 5-fold CV
+
+# ========================
+# Paths
+# ========================
+paths:
+  gene_info: "data/Homo_sapiens_gene_info_with_go_and_pathways.tsv"
+  facet_output: "data/gene_facets.jsonl"
+  facet_embeddings: "data/gene_facet_embeddings.pt"
+  perturb_data_dir: "data/perturb_data"
+  scgpt_checkpoint: "checkpoints/scgpt/whole_human"
+  output_dir: "outputs/replogle_k562"
+
+# ========================
+# LLM API (Module 1 - Facet Decomposition)
+# ========================
+llm:
+  base_url: "https://yunwu.ai/v1"
+  api_key: "${oc.env:LLM_API_KEY}"
+  model: "gemini-3-pro-preview"
+  temperature: 0.3
+  max_tokens: 2048
+  batch_size: 5
+  retry_max: 3
+  retry_delay: 2
+
+# ========================
+# Facets Definition
+# ========================
+facets:
+  num_facets: 8
+  names:
+    - "Transcriptional Regulation"
+    - "Cell Cycle & Proliferation"
+    - "Cell Death & Survival"
+    - "Metabolic Processes"
+    - "Immune Response"
+    - "Signal Transduction"
+    - "Cell Motility & Adhesion"
+    - "Transport & Localization"
+
+# ========================
+# Embedding Model (Module 1 - Text Encoding)
+# ========================
+embedding:
+  model_name: "microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext"
+  max_length: 256
+  batch_size: 64
+  embed_dim: 768
+
+# ========================
+# Cell Encoder (Module 2 - scGPT)
+# ========================
+cell_encoder:
+  model_name: "scGPT"
+  embed_dim: 512
+  freeze_layers: -2
+  max_seq_len: 3000
+
+# ========================
+# Cross-Attention (Module 3)
+# ========================
+cross_attention:
+  num_heads: 8
+  hidden_dim: 768
+  dropout: 0.1
+
+# ========================
+# Perturbation Decoder (Module 4)
+# ========================
+decoder:
+  hidden_dims: [512, 256]
+  dropout: 0.1
+  use_gene_graph: false
+  num_go_layers: 2
+
+# ========================
+# Training
+# ========================
+training:
+  dataset: "replogle_k562_essential"
+  seed: 42
+  epochs: 15
+  batch_size: 64
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  scheduler: "cosine"
+  warmup_steps: 500
+  gradient_clip: 1.0
+  eval_every: 1
+  save_best: true
+  early_stopping_patience: 5
+  loss:
+    mse_weight: 1.0
+    direction_weight: 0.1
+  cross_validation:
+    enabled: true
+    n_folds: 5
+    split_mode: "simulation"
+
+# ========================
+# Dataset-specific settings
+# ========================
+dataset_configs:
+  replogle_k562_essential:
+    data_name: "replogle_k562_essential"
+    split_mode: "simulation"
+    single_gene_only: true
+
+# ========================
+# Evaluation
+# ========================
+evaluation:
+  top_de_genes: 20
+  metrics:
+    - "mse"
+    - "mae"
+    - "pearson_top20"
+    - "pearson_delta_top20"
+    - "direction_accuracy"

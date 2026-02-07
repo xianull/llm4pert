@@ -1,0 +1,129 @@
+# DyGenePT Configuration
+
+# ========================
+# Paths
+# ========================
+paths:
+  gene_info: "data/Homo_sapiens_gene_info_with_go_and_pathways.tsv"
+  facet_output: "data/gene_facets.jsonl"           # step1 输出
+  facet_embeddings: "data/gene_facet_embeddings.pt" # step2 输出
+  perturb_data_dir: "data/perturb_data"
+  scgpt_checkpoint: "checkpoints/scgpt/whole_human"
+  output_dir: "outputs"
+
+# ========================
+# LLM API (Module 1 - Facet Decomposition)
+# ========================
+llm:
+  base_url: "https://yunwu.ai/v1"
+  api_key: "${oc.env:LLM_API_KEY}"    # 从环境变量读取
+  model: "gemini-3-pro-preview"
+  temperature: 0.3
+  max_tokens: 8192
+  batch_size: 32                       # 并发请求数
+  retry_max: 3
+  retry_delay: 2
+
+# ========================
+# Facets Definition
+# ========================
+facets:
+  num_facets: 8
+  names:
+    - "Transcriptional Regulation"
+    - "Cell Cycle & Proliferation"
+    - "Cell Death & Survival"
+    - "Metabolic Processes"
+    - "Immune Response"
+    - "Signal Transduction"
+    - "Cell Motility & Adhesion"
+    - "Transport & Localization"
+
+# ========================
+# Embedding Model (Module 1 - Text Encoding)
+# ========================
+embedding:
+  model_name: "microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext"
+  max_length: 256
+  batch_size: 64
+  embed_dim: 768
+
+# ========================
+# Cell Encoder (Module 2 - scGPT)
+# ========================
+cell_encoder:
+  model_name: "scGPT"
+  embed_dim: 512
+  freeze_layers: -2        # 冻结除最后 2 层外的所有层
+  max_seq_len: 3000         # 最大基因数
+
+# ========================
+# Cross-Attention (Module 3)
+# ========================
+cross_attention:
+  num_heads: 8
+  hidden_dim: 768           # 与 PubMedBERT 维度对齐
+  dropout: 0.1
+
+# ========================
+# Perturbation Decoder (Module 4)
+# ========================
+decoder:
+  hidden_dims: [512, 256]
+  dropout: 0.1
+  use_gene_graph: false      # GO graph (未实现，保留为扩展项)
+  num_go_layers: 2
+
+# ========================
+# Training
+# ========================
+training:
+  dataset: "norman"           # norman / adamson / dixit / replogle_k562_essential / replogle_rpe1_essential
+  seed: 42
+  epochs: 20
+  batch_size: 64
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  scheduler: "cosine"
+  warmup_steps: 500
+  gradient_clip: 1.0
+  eval_every: 1               # 每 N 个 epoch 评估
+  save_best: true
+  early_stopping_patience: 5
+  loss:
+    mse_weight: 1.0
+    direction_weight: 0.1     # top DE genes direction loss
+  # Cross-validation settings (for K562/RPE1 LangPert comparison)
+  cross_validation:
+    enabled: false             # 设为 true 启用 K-fold CV
+    n_folds: 5                 # LangPert 使用 5-fold CV
+    split_mode: "simulation"   # simulation / cross_validation
+
+# ========================
+# Dataset-specific settings
+# ========================
+dataset_configs:
+  norman:
+    data_name: "norman"
+    split_mode: "simulation"         # GEARS simulation split (unseen combos)
+    single_gene_only: false          # 包含组合扰动
+  replogle_k562_essential:
+    data_name: "replogle_k562_essential"
+    split_mode: "simulation"         # 单基因只有 simulation 模式
+    single_gene_only: true           # LangPert 仅评估单基因
+  replogle_rpe1_essential:
+    data_name: "replogle_rpe1_essential"
+    split_mode: "simulation"         # 单基因只有 simulation 模式
+    single_gene_only: true           # LangPert 仅评估单基因
+
+# ========================
+# Evaluation
+# ========================
+evaluation:
+  top_de_genes: 20            # 评估 top N DE genes
+  metrics:
+    - "mse"
+    - "mae"
+    - "pearson_top20"
+    - "pearson_delta_top20"
+    - "direction_accuracy"
