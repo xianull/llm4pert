@@ -113,6 +113,7 @@ class DyGenePT(nn.Module):
         pert_gene_indices: torch.LongTensor, # (B, P) indices into facet tensor
         ctrl_expression: torch.Tensor,       # (B, G) raw control expression
         pert_type_ids: torch.LongTensor = None,  # (B, P) perturbation type indices
+        pert_flags: torch.LongTensor = None,     # (B, L) per-token pert flags (PACE)
     ) -> dict:
         """
         Returns:
@@ -120,9 +121,9 @@ class DyGenePT(nn.Module):
                 'pred_expression': (B, G) predicted post-perturbation expression
                 'attention_weights': (B, P, H, K) sparse facet attention weights
         """
-        # Module 2: Cell state query
+        # Module 2: Cell state query (with optional PACE pert_flags)
         cell_query = self.cell_encoder(
-            gene_ids, values, padding_mask
+            gene_ids, values, padding_mask, pert_flags=pert_flags
         )  # (B, D)
 
         # Module 1: Gene facet lookup (returns confidence if available)

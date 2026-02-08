@@ -132,7 +132,30 @@ class CellEncoder(nn.Module):
         self._freeze_layers(freeze_layers)
 
         # ------------------------------------------------------------------
-        # 6. Projection head: scGPT dim -> cross-attention dim
+        # 6. Perturbation-Aware Cell Encoding (PACE)
+        # ------------------------------------------------------------------
+        pace_cfg = getattr(cfg, 'pert_aware_cell_encoding', None)
+        self.pert_aware = pace_cfg is not None and getattr(pace_cfg, 'enabled', False)
+
+        if self.pert_aware:
+            n_pert_categories = getattr(pace_cfg, 'n_pert_categories', 3)
+            pert_padding_idx = getattr(pace_cfg, 'padding_idx', 2)
+            self.pert_encoder = nn.Embedding(
+                num_embeddings=n_pert_categories,
+                embedding_dim=self.scgpt_dim,
+                padding_idx=pert_padding_idx,
+            )
+            nn.init.normal_(self.pert_encoder.weight, std=0.02)
+            self.pert_encoder.weight.data[pert_padding_idx].zero_()
+            print(
+                f"[CellEncoder] Pert-aware encoding enabled: "
+                f"{n_pert_categories} categories, d={self.scgpt_dim}"
+            )
+        else:
+            self.pert_encoder = None
+
+        # ------------------------------------------------------------------
+        # 7. Projection head: scGPT dim -> cross-attention dim
         # ------------------------------------------------------------------
         self.projection = nn.Sequential(
             nn.Linear(self.scgpt_dim, target_dim),
@@ -144,7 +167,7 @@ class CellEncoder(nn.Module):
         )
 
         # ------------------------------------------------------------------
-        # 7. Attention pooling for richer cell representation
+        # 8. Attention pooling for richer cell representation
         # ------------------------------------------------------------------
         self.attn_pool = AttentionPooling(self.scgpt_dim)
 
@@ -268,6 +291,53 @@ class CellEncoder(nn.Module):
         }
 
     # ------------------------------------------------------------------
+    # Perturbation-aware encoding (bypasses scGPT._encode)
+    # ------------------------------------------------------------------
+    def _encode_with_pert(
+        self,
+        gene_ids: torch.LongTensor,
+        values: torch.Tensor,
+        padding_mask: torch.BoolTensor,
+        pert_flags: torch.LongTensor,
+    ) -> torch.Tensor:
+        """Replicate scGPT._encode but inject perturbation flag embedding.
+
+        Directly accesses scGPT sub-modules to avoid modifying the
+        installed package. The perturbation embedding is summed with
+        gene token + value embeddings before the transformer encoder.
+
+        Args:
+            gene_ids:     (B, L) scGPT token indices.
+            values:       (B, L) expression values.
+            padding_mask: (B, L) True=masked positions.
+            pert_flags:   (B, L) 0=not perturbed, 1=perturbed, 2=padding.
+
+        Returns:
+            (B, L, scgpt_dim) transformer output.
+        """
+        src_emb = self.scgpt.encoder(gene_ids)         # (B, L, d_model)
+        val_emb = self.scgpt.value_encoder(values)      # (B, L, d_model)
+        pert_emb = self.pert_encoder(pert_flags)         # (B, L, d_model)
+
+        total_embs = src_emb + val_emb + pert_emb
+
+        # Preserve scGPT's optional batch norm behavior
+        if getattr(self.scgpt, "dsbn", None) is not None:
+            batch_label = 0
+            total_embs = self.scgpt.dsbn(
+                total_embs.permute(0, 2, 1), batch_label
+            ).permute(0, 2, 1)
+        elif getattr(self.scgpt, "bn", None) is not None:
+            total_embs = self.scgpt.bn(
+                total_embs.permute(0, 2, 1)
+            ).permute(0, 2, 1)
+
+        output = self.scgpt.transformer_encoder(
+            total_embs, src_key_padding_mask=padding_mask
+        )
+        return output  # (B, L, d_model)
+
+    # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
     def forward(
@@ -275,6 +345,7 @@ class CellEncoder(nn.Module):
         gene_ids: torch.LongTensor,  # (B, L)
         values: torch.Tensor,  # (B, L)
         padding_mask: torch.BoolTensor,  # (B, L) True=masked
+        pert_flags: torch.LongTensor = None,  # (B, L) 0/1/2, optional
     ) -> torch.Tensor:
         """Run scGPT encoder and project to cross-attention dimension.
 
@@ -285,10 +356,15 @@ class CellEncoder(nn.Module):
         Returns:
             cell_query: (B, target_dim) projected cell embedding.
         """
-        # Get full transformer output (not just CLS)
-        transformer_output = self.scgpt._encode(
-            gene_ids, values, padding_mask
-        )  # (B, L, scgpt_dim)
+        # Get full transformer output
+        if self.pert_aware and pert_flags is not None:
+            transformer_output = self._encode_with_pert(
+                gene_ids, values, padding_mask, pert_flags
+            )  # (B, L, scgpt_dim)
+        else:
+            transformer_output = self.scgpt._encode(
+                gene_ids, values, padding_mask
+            )  # (B, L, scgpt_dim)
 
         # CLS token at position 0
         cls_emb = transformer_output[:, 0, :]  # (B, scgpt_dim)
