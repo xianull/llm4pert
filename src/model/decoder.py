@@ -290,6 +290,19 @@ class PerturbationDecoderV2(nn.Module):
             final_activation=False,
         )
 
+        # Cross-gene MLP (GEARS-inspired): captures inter-gene dependencies
+        # After per-gene predictions, this learns "if gene A goes up,
+        # gene B should go down" type of cross-gene effects.
+        cross_gene_dim = 256
+        self.cross_gene_mlp = nn.Sequential(
+            nn.Linear(num_genes, cross_gene_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        # Per-gene decoder conditioned on cross-gene embedding
+        # For each gene u: correction_u = w_u · h_cross + b_u
+        self.cross_gene_decoder = nn.Linear(cross_gene_dim, num_genes)
+
         trainable = sum(p.numel() for p in self.parameters())
         print(
             f"[PerturbationDecoderV2] embed_dim={embed_dim}, "
@@ -329,8 +342,14 @@ class PerturbationDecoderV2(nn.Module):
         else:
             factored_delta = self.direct_output(effect)                     # (B, G)
 
-        # Combined delta
+        # Combined delta (per-gene independent predictions)
         delta = scaled_impact + factored_delta                              # (B, G)
+
+        # Cross-gene refinement: capture inter-gene dependencies
+        # "Given this pattern of gene changes, how should each gene be adjusted?"
+        h_cross = self.cross_gene_mlp(delta.detach() if not self.training else delta)  # (B, cross_dim)
+        cross_correction = self.cross_gene_decoder(h_cross)                 # (B, G)
+        delta = delta + cross_correction
 
         # Gate conditioned on baseline expression
         gate = torch.sigmoid(self.gate_net(ctrl_expression))                # (B, G)

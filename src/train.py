@@ -95,13 +95,15 @@ def compute_loss(
         # Standard MSE
         loss_mse = nn.functional.mse_loss(pred, target)
 
-    # --- Direction loss on ALL genes (GEARS-style) ---
+    # --- Direction loss weighted by |delta| (improved GEARS-style) ---
     if direction_weight > 0:
         pred_delta = pred - ctrl_expression
         true_delta = target - ctrl_expression
-        # sign mismatch: [sign(pred_delta) - sign(true_delta)]^2
-        # sign values are -1, 0, or 1, so squared diff is 0 or 4
-        loss_dir = ((torch.sign(pred_delta) - torch.sign(true_delta)) ** 2).mean()
+        # sign mismatch: [sign(pred_delta) - sign(true_delta)]^2 ∈ {0, 4}
+        sign_diff_sq = (torch.sign(pred_delta) - torch.sign(true_delta)) ** 2
+        # Weight by |true_delta|: DE genes (large delta) dominate, noise genes ignored
+        weights = true_delta.abs()
+        loss_dir = (sign_diff_sq * weights).sum() / weights.sum().clamp(min=1e-6)
     else:
         loss_dir = torch.tensor(0.0, device=device)
 
@@ -758,15 +760,36 @@ def train(cfg):
                         )
                         for k, v in ds_metrics.items():
                             val_metrics[f"{ds_name}/{k}"] = v
+                        # Add dataset as a top-level "subgroup" for table display
+                        for mk in ["pearson_delta_all", "pearson_delta_top20", "pearson_top20",
+                                    "mse", "mse_de", "mae", "direction_accuracy"]:
+                            if mk in ds_metrics:
+                                val_metrics[f"{ds_name}/{mk}"] = ds_metrics[mk]
+                        # Count: total perturbations evaluated in this dataset
+                        n_total = sum(int(v) for k, v in ds_metrics.items()
+                                      if k.startswith("_n_") and isinstance(v, (int, float)))
+                        val_metrics[f"_n_{ds_name}"] = n_total
                         if use_wandb:
                             import wandb
                             wandb.log({f"val/{ds_name}/{k}": v for k, v in ds_metrics.items()})
-                    # Average all metrics for logging
-                    avg_keys = ["pearson_delta_all", "mse", "pearson_top20",
-                                "pearson_delta_top20", "direction_accuracy"]
-                    for mk in avg_keys:
-                        vals = [val_metrics.get(f"{dn}/{mk}", 0) for dn in val_datasets]
+                    # Average ALL metrics across datasets (not just a few)
+                    ds_names_list = list(val_datasets.keys())
+                    all_metric_keys = set()
+                    for dn in ds_names_list:
+                        for k in val_metrics:
+                            if k.startswith(f"{dn}/") and not k.startswith(f"{dn}/_"):
+                                all_metric_keys.add(k.split("/", 1)[1])
+                    for mk in all_metric_keys:
+                        vals = [val_metrics.get(f"{dn}/{mk}", 0) for dn in ds_names_list
+                                if f"{dn}/{mk}" in val_metrics]
                         val_metrics[mk] = sum(vals) / len(vals) if vals else 0
+                    # Also store per-dataset N counts for table
+                    for dn in ds_names_list:
+                        n_key = f"_n_{dn}"
+                        # Sum all _n_ keys from this dataset
+                        total_n = sum(v for k, v in val_metrics.items()
+                                      if k.startswith(f"{dn}/_n_") and isinstance(v, (int, float)))
+                        val_metrics[n_key] = int(total_n) if total_n else 0
                 else:
                     val_metrics = evaluate_model(
                         raw_model, val_dataset, device, cfg, collate_perturbation_batch,
@@ -852,9 +875,26 @@ def train(cfg):
                         test_metrics[f"{ds_name}/{k}"] = v
                 logger.info("=" * 60)
 
+                # N count for table
+                n_total = sum(int(v) for k, v in ds_metrics.items()
+                              if k.startswith("_n_") and isinstance(v, (int, float)))
+                test_metrics[f"_n_{ds_name}"] = n_total
+
                 subgroup_table = format_subgroup_table(ds_metrics)
                 if subgroup_table:
                     logger.info("\n" + subgroup_table)
+
+            # Average all metrics across datasets
+            ds_names_list = list(test_datasets.keys())
+            all_metric_keys = set()
+            for dn in ds_names_list:
+                for k in test_metrics:
+                    if k.startswith(f"{dn}/") and not k.startswith(f"{dn}/_"):
+                        all_metric_keys.add(k.split("/", 1)[1])
+            for mk in all_metric_keys:
+                vals = [test_metrics[f"{dn}/{mk}"] for dn in ds_names_list
+                        if f"{dn}/{mk}" in test_metrics]
+                test_metrics[mk] = sum(vals) / len(vals) if vals else 0
         else:
             test_metrics = evaluate_model(
                 raw_model, test_dataset, device, cfg, collate_perturbation_batch,
