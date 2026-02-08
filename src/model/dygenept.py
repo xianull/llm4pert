@@ -135,24 +135,6 @@ class Contextualizer(nn.Module):
         out = self.layer_norm(gamma * pert_facets + beta)       # (B, P, K, D)
         return self.dropout(out)
 
-    def forward(
-        self,
-        cell_emb: torch.Tensor,       # (B, D)
-        pert_facets: torch.Tensor,     # (B, P, K, D)
-    ) -> torch.Tensor:
-        """
-        Returns:
-            context_Q: (B, P, K, D) cell-conditioned facet representations.
-        """
-        D = self.embed_dim
-        cond = cell_emb.unsqueeze(1)                       # (B, 1, D)
-        film_out = self.film_net(cond)                      # (B, 1, 2D)
-        gamma = film_out[..., :D].unsqueeze(2)              # (B, 1, 1, D)
-        beta = film_out[..., D:].unsqueeze(2)               # (B, 1, 1, D)
-        # Broadcast gamma/beta over P and K dimensions
-        out = self.layer_norm(gamma * pert_facets + beta)    # (B, P, K, D)
-        return self.dropout(out)
-
 
 # =====================================================================
 # Main model
