@@ -70,7 +70,7 @@ embedding:
 cell_encoder:
   model_name: "scGPT"
   embed_dim: 512
-  freeze_layers: 0        # 冻结除最后 2 层外的所有层
+  freeze_layers: -2        # 冻结除最后 2 层外的所有层
   max_seq_len: 3000         # 最大基因数
 
 # ========================
@@ -130,6 +130,8 @@ training:
     mse_weight: 1.0
     de_mse_weight: 0.5           # DE-focused MSE on top DE genes
     direction_weight: 0.1     # top DE genes direction loss
+  # Data augmentation
+  pert_gene_dropout: 0.25      # 组合扰动中随机 drop 一个基因的概率 (0=禁用)
   # Cross-validation settings (for K562/RPE1 LangPert comparison)
   cross_validation:
     enabled: false             # 设为 true 启用 K-fold CV

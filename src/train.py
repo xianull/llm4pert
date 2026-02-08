@@ -253,6 +253,9 @@ def train(cfg):
     pert_aware_enabled = pace_cfg is not None and getattr(pace_cfg, 'enabled', False)
     force_include_pert = getattr(pace_cfg, 'force_include_pert_genes', True) if pace_cfg else True
 
+    # Perturbation gene dropout (data augmentation, training only)
+    pert_gene_dropout = float(getattr(cfg.training, 'pert_gene_dropout', 0.0))
+
     if is_main_process(rank):
         print("Creating dataloaders....")
     train_dataset = PerturbationDataset(
@@ -261,6 +264,7 @@ def train(cfg):
         pert_type_id=pert_type_id,
         pert_aware=pert_aware_enabled,
         force_include_pert_genes=force_include_pert,
+        pert_gene_dropout=pert_gene_dropout,
     )
     val_dataset = PerturbationDataset(
         pert_data, "val", gene_to_facet_idx, scgpt_vocab, gene_names,
