@@ -194,15 +194,16 @@ class PerturbationDecoder(nn.Module):
 
 
 class PerturbationDecoderV2(nn.Module):
-    """V2 decoder: direct impact map → gated prediction.
+    """V2 decoder: impact map → nonlinear transform → gated prediction.
 
-    The SemanticCrossAttention already produces per-gene impact scores,
-    so the decoder only needs to scale and gate them.
+    The SemanticCrossAttention produces per-gene semantic impact scores.
+    These are NOT expression deltas — they're similarity scores. This decoder
+    transforms them into expression changes via a learnable nonlinear mapping.
 
     Architecture:
-      magnitude = MLP(cell_emb)           -> (B, 1) global scale
-      gate = sigmoid(MLP(ctrl_expression)) -> (B, G) per-gene gate
-      pred = ctrl + gate * impact * magnitude
+      delta = impact_transform(impact_map, cell_emb)  -> (B, G)
+      gate = sigmoid(gate_net(ctrl_expression))        -> (B, G)
+      pred = ctrl + gate * delta
     """
 
     def __init__(
@@ -215,12 +216,16 @@ class PerturbationDecoderV2(nn.Module):
         self.embed_dim = embed_dim
         self.num_genes = num_genes
 
-        # Magnitude: cell state → global perturbation strength
-        self.magnitude_net = nn.Sequential(
-            nn.Linear(embed_dim, 256),
+        # Transform semantic impact → expression delta
+        # impact_map (B, G) + cell_emb features → per-gene delta
+        self.impact_transform = nn.Sequential(
+            nn.Linear(num_genes + embed_dim, 1024),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(256, 1),
+            nn.Linear(1024, 1024),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(1024, num_genes),
         )
 
         # Gate: ctrl expression → per-gene activation filter
@@ -230,6 +235,10 @@ class PerturbationDecoderV2(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(1024, num_genes),
         )
+
+        # Small init for impact_transform output layer → initial pred ≈ ctrl
+        nn.init.zeros_(self.impact_transform[-1].weight)
+        nn.init.zeros_(self.impact_transform[-1].bias)
 
         trainable = sum(p.numel() for p in self.parameters())
         print(
@@ -247,7 +256,12 @@ class PerturbationDecoderV2(nn.Module):
         Returns:
             pred_expression: (B, G) predicted post-perturbation expression.
         """
-        magnitude = self.magnitude_net(cell_emb)                  # (B, 1)
-        gate = torch.sigmoid(self.gate_net(ctrl_expression))      # (B, G)
-        pred_expression = ctrl_expression + gate * impact_map * magnitude
+        # Concatenate impact + cell context → nonlinear delta prediction
+        decoder_input = torch.cat([impact_map, cell_emb], dim=-1)  # (B, G+D)
+        delta = self.impact_transform(decoder_input)                # (B, G)
+
+        # Gate conditioned on baseline expression
+        gate = torch.sigmoid(self.gate_net(ctrl_expression))        # (B, G)
+
+        pred_expression = ctrl_expression + gate * delta
         return pred_expression
