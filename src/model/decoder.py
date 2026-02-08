@@ -20,14 +20,19 @@ class PerturbationDecoder(nn.Module):
       5. residual: pred = decoded + ctrl_expression
 
     For combinatorial perturbations (2 genes), shift vectors are summed.
+
+    If gene_embed_aware=True, the last linear layer is replaced by a
+    gene-embedding-aware output: effect @ gene_embeddings.T + gene_bias,
+    enabling generalization to unseen genes.
     """
 
-    def __init__(self, cfg, num_genes: int):
+    def __init__(self, cfg, num_genes: int, gene_facet_tensor: torch.Tensor = None):
         super().__init__()
         self.embed_dim = cfg.cross_attention.hidden_dim  # 768
         self.num_genes = num_genes
         hidden_dims = list(cfg.decoder.hidden_dims)      # [512, 256]
         dropout = cfg.decoder.dropout
+        self.gene_embed_aware = getattr(cfg.decoder, 'gene_embed_aware', False)
 
         # --- Shift encoder: dynamic_emb -> latent shift ---
         shift_layers = []
@@ -50,15 +55,53 @@ class PerturbationDecoder(nn.Module):
         )
 
         # --- Expression decoder: latent (with cell skip) -> full transcriptome ---
-        self.expression_decoder = nn.Sequential(
-            nn.Linear(self.latent_dim * 2, 512),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(512, 1024),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(1024, num_genes),
-        )
+        backbone_hidden = 1024  # intermediate dimension in backbone
+        if self.gene_embed_aware:
+            # Backbone: first two layers (non-linear feature extraction)
+            self.expression_backbone = nn.Sequential(
+                nn.Linear(self.latent_dim * 2, 512),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(512, backbone_hidden),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            )
+
+            # Gene-embedding-aware output head
+            d_out = getattr(cfg.decoder, 'gene_embed_dim', 512)
+            self.effect_proj = nn.Linear(backbone_hidden, d_out)
+            self.gene_bias = nn.Parameter(torch.zeros(num_genes))
+
+            # Project gene facet embeddings -> gene_embeddings buffer
+            assert gene_facet_tensor is not None, (
+                "gene_facet_tensor is required when gene_embed_aware=True"
+            )
+            # gene_facet_tensor: (G, K, 768) -> mean pool -> (G, 768)
+            gene_mean = gene_facet_tensor.mean(dim=1)  # (G, 768)
+            self.gene_embed_proj = nn.Sequential(
+                nn.Linear(gene_facet_tensor.shape[-1], d_out),
+                nn.GELU(),
+                nn.LayerNorm(d_out),
+            )
+            # Compute initial gene embeddings and register as buffer
+            with torch.no_grad():
+                gene_embeddings = self.gene_embed_proj(gene_mean)  # (G, d_out)
+            self.register_buffer("gene_embeddings", gene_embeddings)
+
+            print(
+                f"[PerturbationDecoder] gene_embed_aware=True, d_out={d_out}, "
+                f"gene_embeddings={gene_embeddings.shape}"
+            )
+        else:
+            self.expression_decoder = nn.Sequential(
+                nn.Linear(self.latent_dim * 2, 512),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(512, backbone_hidden),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(backbone_hidden, num_genes),
+            )
 
         # --- ctrl_expression encoder for gate conditioning ---
         self.ctrl_encoder = nn.Sequential(
@@ -71,7 +114,8 @@ class PerturbationDecoder(nn.Module):
 
         print(
             f"[PerturbationDecoder] embed_dim={self.embed_dim}, "
-            f"latent_dim={self.latent_dim}, num_genes={num_genes}"
+            f"latent_dim={self.latent_dim}, num_genes={num_genes}, "
+            f"gene_embed_aware={self.gene_embed_aware}"
         )
 
     def forward(

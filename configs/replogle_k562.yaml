@@ -112,7 +112,7 @@ training:
   dataset: "replogle_k562_essential"
   seed: 42
   epochs: 15
-  batch_size: 64
+  batch_size: 128
   lr: 1.0e-4
   weight_decay: 1.0e-5
   scheduler: "cosine"
@@ -120,7 +120,7 @@ training:
   gradient_clip: 1.0
   eval_every: 1
   save_best: true
-  early_stopping_patience: 5
+  early_stopping_patience: 3
   loss:
     mse_weight: 1.0
     de_mse_weight: 0.5

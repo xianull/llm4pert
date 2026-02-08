@@ -125,7 +125,7 @@ training:
   gradient_clip: 1.0
   eval_every: 1               # 每 N 个 epoch 评估
   save_best: true
-  early_stopping_patience: 5
+  early_stopping_patience: 3
   loss:
     mse_weight: 1.0
     de_mse_weight: 0.5           # DE-focused MSE on top DE genes
