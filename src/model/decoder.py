@@ -196,19 +196,22 @@ class PerturbationDecoder(nn.Module):
 
 
 class PerturbationDecoderV2(nn.Module):
-    """V2 decoder: impact map → perturbation-aware correction → gated prediction.
+    """V2 decoder: factored gene-embedding projection (like GEARS per-gene layers).
+
+    Instead of MLP → (B, G) direct mapping, we use:
+      effect = MLP(impact_summary + cell_emb)  → (B, d_effect)
+      delta = effect @ gene_emb.T + bias       → (B, G)
+
+    This is equivalent to having a per-gene linear layer (like GEARS w_u),
+    where each gene's "projection" comes from its semantic embedding.
+    Plus a direct residual from the cross-attention impact_map.
 
     Architecture:
-      1. Residual: impact_map * per-gene scale (direct gradient to cross-attn)
-      2. Perturbation-aware correction: MLP(impact_summary + cell_emb) → (B, G)
-         - impact_summary compresses impact_map to a compact perturbation fingerprint
-         - This lets the correction know WHICH gene was perturbed
-      3. Gate: sigmoid(MLP(ctrl_expression)) → (B, G) context filter
-
-    Formula:
-      impact_summary = Linear(impact_map)               -> (B, summary_dim)
-      correction = MLP(concat(impact_summary, cell_emb)) -> (B, G)
-      delta = impact_map * scale + correction
+      impact_summary = Linear(impact_map)             → (B, summary_dim)
+      effect = MLP(impact_summary + cell_emb)          → (B, d_effect)
+      factored_delta = effect @ gene_emb.T + gene_bias → (B, G)
+      delta = impact_map * scale + factored_delta
+      gate = sigmoid(MLP(ctrl_expression))             → (B, G)
       pred = ctrl + gate * delta
     """
 
@@ -220,13 +223,16 @@ class PerturbationDecoderV2(nn.Module):
         impact_hidden_dims: list = None,
         gate_hidden_dims: list = None,
         impact_summary_dim: int = 256,
+        effect_dim: int = 512,
+        gene_facet_tensor: torch.Tensor = None,
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_genes = num_genes
+        self.effect_dim = effect_dim
 
         if impact_hidden_dims is None:
-            impact_hidden_dims = [1024, 1024]
+            impact_hidden_dims = [1024]
         if gate_hidden_dims is None:
             gate_hidden_dims = [1024]
 
@@ -239,19 +245,40 @@ class PerturbationDecoderV2(nn.Module):
             nn.GELU(),
         )
 
-        # Perturbation-aware correction: sees BOTH cell state AND perturbation pattern
+        # Effect network: (impact_summary + cell_emb) → compact effect vector
         correction_input_dim = impact_summary_dim + embed_dim
-        self.correction_net = build_mlp(
+        self.effect_net = build_mlp(
             in_dim=correction_input_dim,
-            out_dim=num_genes,
+            out_dim=effect_dim,
             hidden_dims=impact_hidden_dims,
             activation="gelu",
             dropout=dropout,
             final_activation=False,
         )
-        # Initialize correction output to zero → initial pred ≈ ctrl
-        nn.init.zeros_(self.correction_net[-1].weight)
-        nn.init.zeros_(self.correction_net[-1].bias)
+
+        # Per-gene bias
+        self.gene_bias = nn.Parameter(torch.zeros(num_genes))
+
+        # Gene embeddings for factored output: effect @ gene_emb.T
+        if gene_facet_tensor is not None:
+            # Mean-pool facets → (G, facet_dim), then project → (G, effect_dim)
+            gene_mean = gene_facet_tensor.mean(dim=1)  # (G, 768)
+            self.register_buffer("_gene_mean", gene_mean)
+            self.gene_embed_proj = nn.Sequential(
+                nn.Linear(gene_facet_tensor.shape[-1], effect_dim),
+                nn.GELU(),
+                nn.LayerNorm(effect_dim),
+            )
+            self._has_gene_emb = True
+        else:
+            # Fallback: direct linear output (no factorization)
+            self.direct_output = nn.Linear(effect_dim, num_genes)
+            nn.init.zeros_(self.direct_output.weight)
+            nn.init.zeros_(self.direct_output.bias)
+            self._has_gene_emb = False
+
+        # Learnable temperature for scaled dot-product
+        self.logit_scale = nn.Parameter(torch.tensor(1.0 / (effect_dim ** 0.5)))
 
         # Gate: ctrl expression → per-gene activation filter
         self.gate_net = build_mlp(
@@ -266,9 +293,10 @@ class PerturbationDecoderV2(nn.Module):
         trainable = sum(p.numel() for p in self.parameters())
         print(
             f"[PerturbationDecoderV2] embed_dim={embed_dim}, "
-            f"num_genes={num_genes}, summary_dim={impact_summary_dim}, "
-            f"correction_hidden={impact_hidden_dims}, "
-            f"gate_hidden={gate_hidden_dims}, trainable={trainable:,}"
+            f"num_genes={num_genes}, effect_dim={effect_dim}, "
+            f"summary_dim={impact_summary_dim}, "
+            f"gene_emb={'yes' if self._has_gene_emb else 'no'}, "
+            f"trainable={trainable:,}"
         )
 
     def forward(
@@ -281,21 +309,31 @@ class PerturbationDecoderV2(nn.Module):
         Returns:
             pred_expression: (B, G) predicted post-perturbation expression.
         """
-        # Residual path: direct scaling (strong gradient to cross-attn)
-        scaled_impact = impact_map * self.impact_scale              # (B, G)
+        # Residual path: direct scaling (gradient to cross-attn)
+        scaled_impact = impact_map * self.impact_scale                    # (B, G)
 
-        # Perturbation fingerprint: compress impact pattern
-        impact_summary = self.impact_projector(impact_map)           # (B, summary_dim)
+        # Perturbation fingerprint
+        impact_summary = self.impact_projector(impact_map)                 # (B, summary_dim)
 
-        # Correction: perturbation-aware + cell-state-aware
-        correction_input = torch.cat([impact_summary, cell_emb], dim=-1)  # (B, summary_dim+D)
-        correction = self.correction_net(correction_input)            # (B, G)
+        # Effect vector: perturbation-aware + cell-state-aware
+        effect_input = torch.cat([impact_summary, cell_emb], dim=-1)       # (B, summary+D)
+        effect = self.effect_net(effect_input)                              # (B, effect_dim)
+
+        # Factored gene-level prediction: effect @ gene_emb.T
+        if self._has_gene_emb:
+            gene_emb = self.gene_embed_proj(self._gene_mean)               # (G, effect_dim)
+            # Normalized dot product with learnable temperature
+            effect_norm = nn.functional.normalize(effect, dim=-1)           # (B, effect_dim)
+            gene_emb_norm = nn.functional.normalize(gene_emb, dim=-1)      # (G, effect_dim)
+            factored_delta = self.logit_scale * (effect_norm @ gene_emb_norm.t()) + self.gene_bias
+        else:
+            factored_delta = self.direct_output(effect)                     # (B, G)
 
         # Combined delta
-        delta = scaled_impact + correction                            # (B, G)
+        delta = scaled_impact + factored_delta                              # (B, G)
 
         # Gate conditioned on baseline expression
-        gate = torch.sigmoid(self.gate_net(ctrl_expression))          # (B, G)
+        gate = torch.sigmoid(self.gate_net(ctrl_expression))                # (B, G)
 
         pred_expression = ctrl_expression + gate * delta
         return pred_expression

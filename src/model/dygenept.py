@@ -270,13 +270,16 @@ class DyGenePT(nn.Module):
         # Register genome facets as frozen buffer inside cross_attention
         self.cross_attention.register_buffer('_genome_facets', aligned_facets)
 
-        # Module 4: Simplified decoder
+        # Module 4: Factored decoder with gene embeddings
+        effect_dim = int(getattr(cfg.decoder, 'gene_embed_dim', 512))
         self.decoder = PerturbationDecoderV2(
             embed_dim=target_dim,
             num_genes=num_genes,
             dropout=getattr(cfg.decoder, 'dropout', 0.1),
             impact_hidden_dims=impact_hidden,
             gate_hidden_dims=gate_hidden,
+            effect_dim=effect_dim,
+            gene_facet_tensor=aligned_facets,
         )
 
         # No perturbation type embedding in v2 (CRISPRi only)
