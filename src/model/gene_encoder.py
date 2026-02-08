@@ -1,12 +1,13 @@
 """Module 1: Multifaceted Gene Encoder.
 
 Serves precomputed gene facet embeddings. Loads the static tensor
-(num_genes, K, D) and provides lookup by gene index.
+(num_genes, K, D) and provides lookup by gene index. Optionally
+loads a confidence mask from KG-based facet imputation.
 """
 
 import torch
 import torch.nn as nn
-from typing import Dict
+from typing import Dict, Optional, Tuple
 
 
 class GeneEncoder(nn.Module):
@@ -14,6 +15,9 @@ class GeneEncoder(nn.Module):
 
     The tensor is frozen by default (no gradient). Each gene is
     represented by K facet vectors of dimension D.
+
+    If the tensor file contains a "confidence" key (from KG imputation),
+    it is loaded as a buffer and returned alongside embeddings.
     """
 
     def __init__(
@@ -27,7 +31,7 @@ class GeneEncoder(nn.Module):
         self.num_facets = num_facets
         self.embed_dim = embed_dim
 
-        # Load saved data: {"tensor": ..., "gene_to_idx": ..., "facet_names": ...}
+        # Load saved data: {"tensor": ..., "gene_to_idx": ..., "facet_names": ..., "confidence": ...}
         saved = torch.load(facet_embeddings_path, map_location="cpu", weights_only=False)
         self.gene_to_idx: Dict[str, int] = saved["gene_to_idx"]
         self.facet_names = saved["facet_names"]
@@ -38,9 +42,28 @@ class GeneEncoder(nn.Module):
         else:
             self.facet_tensor = nn.Parameter(saved["tensor"])
 
+        # Load confidence mask if present (from KG imputation)
+        if "confidence" in saved:
+            self.register_buffer("confidence_mask", saved["confidence"])  # (G, K)
+            print(
+                f"[GeneEncoder] Loaded confidence mask: "
+                f"native={int((saved['confidence'] == 1.0).sum())}, "
+                f"imputed={int(((saved['confidence'] > 0) & (saved['confidence'] < 1.0)).sum())}, "
+                f"null={int((saved['confidence'] == 0).sum())}"
+            )
+        else:
+            self.confidence_mask = None
+
         # Learnable null embedding for unknown genes (index = -1)
         self.null_embedding = nn.Parameter(
             torch.randn(1, num_facets, embed_dim) * 0.01
+        )
+
+        # Learnable adapter to fine-tune frozen embeddings for downstream task
+        self.adapter = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
+            nn.LayerNorm(embed_dim),
         )
 
         print(
@@ -57,7 +80,9 @@ class GeneEncoder(nn.Module):
             [self.gene_to_idx.get(g, -1) for g in gene_symbols]
         )
 
-    def forward(self, gene_indices: torch.LongTensor) -> torch.Tensor:
+    def forward(
+        self, gene_indices: torch.LongTensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Look up facet embeddings for a batch of gene indices.
 
         Args:
@@ -65,7 +90,9 @@ class GeneEncoder(nn.Module):
                           -1 means unknown gene -> null embedding.
 
         Returns:
-            (batch, num_perts, K, D) facet embedding tensor.
+            embeddings: (batch, num_perts, K, D) facet embedding tensor.
+            confidence: (batch, num_perts, K) confidence scores, or None
+                        if no confidence mask was loaded.
         """
         # Create mask for unknown genes
         unknown_mask = gene_indices == -1  # (B, P)
@@ -76,6 +103,9 @@ class GeneEncoder(nn.Module):
         # Index into facet tensor: (B, P, K, D)
         embeddings = self.facet_tensor[safe_indices]
 
+        # Apply learnable adapter to adapt frozen embeddings
+        embeddings = self.adapter(embeddings)
+
         # Replace unknown gene embeddings with null embedding
         if unknown_mask.any():
             null = self.null_embedding.expand(
@@ -83,4 +113,11 @@ class GeneEncoder(nn.Module):
             )  # (1, K, D)
             embeddings[unknown_mask] = null.squeeze(0)
 
-        return embeddings
+        # Look up confidence if available
+        confidence = None
+        if self.confidence_mask is not None:
+            confidence = self.confidence_mask[safe_indices]  # (B, P, K)
+            if unknown_mask.any():
+                confidence[unknown_mask] = 0.5  # moderate confidence for unknown genes
+
+        return embeddings, confidence

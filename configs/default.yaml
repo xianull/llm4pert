@@ -10,6 +10,7 @@ paths:
   perturb_data_dir: "data/perturb_data"
   scgpt_checkpoint: "checkpoints/scgpt/whole_human"
   output_dir: "outputs"
+  kg_dir: "data/kg"                                # 知识图谱数据目录
 
 # ========================
 # LLM API (Module 1 - Facet Decomposition)
@@ -42,9 +43,24 @@ facets:
 # ========================
 # Embedding Model (Module 1 - Text Encoding)
 # ========================
+# backend: "local" = HuggingFace model, "api" = remote /v1/embeddings
 embedding:
-  model_name: "microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext"
+  backend: "local"
+  # --- local backend ---
+  model_name: "FremyCompany/BioLORD-2023-M"
+  pooling: "mean"                    # mean / cls
   max_length: 256
+  # --- api backend (used when backend=api) ---
+  api:
+    base_url: "https://api.siliconflow.cn/v1"
+    api_key: "${oc.env:EMBED_API_KEY}"
+    model: "Qwen/Qwen3-Embedding-8B"
+    dimensions: 768                   # Qwen3 supports 64~4096, set 768 to align downstream
+    batch_limit: 32                   # SiliconFlow max 32 per request
+    concurrency: 8                    # async concurrent requests
+    retry_max: 3
+    retry_delay: 2
+  # --- common ---
   batch_size: 64
   embed_dim: 768
 
@@ -92,6 +108,7 @@ training:
   early_stopping_patience: 5
   loss:
     mse_weight: 1.0
+    de_mse_weight: 0.5           # DE-focused MSE on top DE genes
     direction_weight: 0.1     # top DE genes direction loss
   # Cross-validation settings (for K562/RPE1 LangPert comparison)
   cross_validation:
@@ -127,3 +144,29 @@ evaluation:
     - "pearson_top20"
     - "pearson_delta_top20"
     - "direction_accuracy"
+
+# ========================
+# KG Text Enrichment (Step 1.5)
+# ========================
+kg_enrichment:
+  enabled: true
+  string_evidence_filter:      # STRING 证据类型过滤
+    - "experiments"
+    - "database"
+  max_neighbors: 5             # 每个基因最多取几个 PPI 邻居描述
+
+# ========================
+# KG Facet Imputation (Step 4)
+# ========================
+imputation:
+  enabled: true
+  max_neighbors: 20            # 搜索邻居的最大数量
+  min_informed_neighbors: 2    # 第1轮至少需要几个邻居（后续轮降为1）
+  confidence_cap: 0.8          # 补全 facet 的最大置信度（原生=1.0）
+  num_rounds: 3                # 迭代传播轮数（每轮用上轮结果继续填充）
+  evidence_weights:            # STRING 证据类型权重
+    experiments: 1.0
+    database: 0.8
+    experiments_transferred: 0.5
+    textmining: 0.3
+    textmining_transferred: 0.2

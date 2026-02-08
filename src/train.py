@@ -65,19 +65,21 @@ def compute_loss(
     de_idx_len: torch.LongTensor,  # (B,)
     ctrl_expression: torch.Tensor,  # (B, G)
     mse_weight: float = 1.0,
+    de_mse_weight: float = 0.5,
     direction_weight: float = 0.1,
 ) -> dict:
-    """Combined MSE + direction loss.
+    """Combined MSE + DE-focused MSE + direction loss.
 
     MSE loss:       on all genes.
+    DE MSE loss:    focused MSE on top DE genes only.
     Direction loss:  on top DE genes, ensuring predicted direction of change
                      (up/down relative to control) matches ground truth.
     """
     # Global MSE
     loss_mse = nn.functional.mse_loss(pred, target)
 
-    # Direction loss on DE genes
-    if direction_weight > 0 and de_idx_len.sum() > 0:
+    # Direction loss and DE-focused MSE on DE genes
+    if (de_mse_weight > 0 or direction_weight > 0) and de_idx_len.sum() > 0:
         # Clamp de_idx to valid range to prevent OOB on gather
         de_idx = de_idx.clamp(0, pred.shape[1] - 1)
 
@@ -87,23 +89,35 @@ def compute_loss(
         target_de = target.gather(1, de_idx)  # (B, top_de)
         ctrl_de = ctrl_expression.gather(1, de_idx)
 
-        pred_delta = pred_de - ctrl_de
-        target_delta = target_de - ctrl_de
-        target_dir = (target_delta > 0).float()
-
         # Mask out padded DE indices
         mask = torch.arange(de_idx.shape[1], device=de_idx.device).unsqueeze(0)
         mask = mask < de_idx_len.unsqueeze(1)  # (B, top_de) bool
 
-        loss_dir = nn.functional.binary_cross_entropy_with_logits(
-            pred_delta, target_dir, reduction="none"
-        )
-        loss_dir = (loss_dir * mask.float()).sum() / mask.float().sum().clamp(min=1)
+        # DE-focused MSE (masked)
+        if de_mse_weight > 0:
+            de_mse_raw = nn.functional.mse_loss(pred_de, target_de, reduction="none")
+            loss_de_mse = (de_mse_raw * mask.float()).sum() / mask.float().sum().clamp(min=1)
+        else:
+            loss_de_mse = torch.tensor(0.0, device=pred.device)
+
+        # Direction loss
+        if direction_weight > 0:
+            pred_delta = pred_de - ctrl_de
+            target_delta = target_de - ctrl_de
+            target_dir = (target_delta > 0).float()
+
+            loss_dir = nn.functional.binary_cross_entropy_with_logits(
+                pred_delta, target_dir, reduction="none"
+            )
+            loss_dir = (loss_dir * mask.float()).sum() / mask.float().sum().clamp(min=1)
+        else:
+            loss_dir = torch.tensor(0.0, device=pred.device)
     else:
+        loss_de_mse = torch.tensor(0.0, device=pred.device)
         loss_dir = torch.tensor(0.0, device=pred.device)
 
-    total = mse_weight * loss_mse + direction_weight * loss_dir
-    return {"total": total, "mse": loss_mse, "direction": loss_dir}
+    total = mse_weight * loss_mse + de_mse_weight * loss_de_mse + direction_weight * loss_dir
+    return {"total": total, "mse": loss_mse, "de_mse": loss_de_mse, "direction": loss_dir}
 
 
 # =====================================================================
@@ -301,6 +315,7 @@ def train(cfg):
 
         epoch_loss = 0.0
         epoch_mse = 0.0
+        epoch_de_mse = 0.0
         epoch_dir = 0.0
         num_batches = 0
 
@@ -337,6 +352,7 @@ def train(cfg):
                 de_idx_len=de_idx_len,
                 ctrl_expression=ctrl_expression,
                 mse_weight=cfg.training.loss.mse_weight,
+                de_mse_weight=cfg.training.loss.de_mse_weight,
                 direction_weight=cfg.training.loss.direction_weight,
             )
 
@@ -350,6 +366,7 @@ def train(cfg):
             # Accumulate
             epoch_loss += losses["total"].item()
             epoch_mse += losses["mse"].item()
+            epoch_de_mse += losses["de_mse"].item()
             epoch_dir += losses["direction"].item()
             num_batches += 1
 
@@ -363,12 +380,13 @@ def train(cfg):
         # Epoch averages
         avg_loss = epoch_loss / max(num_batches, 1)
         avg_mse = epoch_mse / max(num_batches, 1)
+        avg_de_mse = epoch_de_mse / max(num_batches, 1)
         avg_dir = epoch_dir / max(num_batches, 1)
 
         if is_main_process(rank):
             logger.info(
                 f"Epoch {epoch + 1}: loss={avg_loss:.4f}, "
-                f"mse={avg_mse:.4f}, dir={avg_dir:.4f}, "
+                f"mse={avg_mse:.4f}, de_mse={avg_de_mse:.4f}, dir={avg_dir:.4f}, "
                 f"lr={scheduler.get_lr()[0]:.2e}"
             )
 
@@ -377,6 +395,7 @@ def train(cfg):
                 wandb.log({
                     "train/loss": avg_loss,
                     "train/mse": avg_mse,
+                    "train/de_mse": avg_de_mse,
                     "train/direction": avg_dir,
                     "train/lr": scheduler.get_lr()[0],
                     "epoch": epoch + 1,

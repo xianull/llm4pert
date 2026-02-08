@@ -1,11 +1,18 @@
-"""Encode facet texts with frozen BiomedBERT to produce the static gene facet tensor."""
+"""Encode facet texts to produce the static gene facet tensor.
 
+Supports two backends:
+  - local : HuggingFace model (BiomedBERT, BioLORD, etc.) with CLS / mean pooling
+  - api   : OpenAI-compatible /v1/embeddings endpoint (SiliconFlow, OpenAI, etc.)
+            with async concurrent requests for high throughput
+"""
+
+import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import torch
-from transformers import AutoTokenizer, AutoModel
 from tqdm import tqdm
 
 NULL_TOKEN = "<NULL>"
@@ -14,37 +21,68 @@ NULL_TOKEN = "<NULL>"
 class FacetEmbedder:
     """Encodes decomposed facet texts into a static tensor (num_genes, K, D).
 
-    Uses frozen BiomedBERT to extract [CLS] token embeddings for each facet
-    paragraph. NULL facets are mapped to zero vectors.
+    NULL facets are mapped to zero vectors.
     """
 
     def __init__(self, cfg):
-        self.model_name = cfg.embedding.model_name
-        self.max_length = cfg.embedding.max_length
+        self.embed_dim = cfg.embedding.embed_dim  # target dimension
         self.batch_size = cfg.embedding.batch_size
-        self.embed_dim = cfg.embedding.embed_dim  # 768
         self.num_facets = cfg.facets.num_facets
         self.facet_names: List[str] = list(cfg.facets.names)
+
+        # Determine backend: "api" or "local"
+        self.backend = getattr(cfg.embedding, "backend", "local")
+
+        if self.backend == "api":
+            self._init_api(cfg)
+        else:
+            self._init_local(cfg)
+
+    # ------------------------------------------------------------------
+    # Initialization
+    # ------------------------------------------------------------------
+    def _init_local(self, cfg):
+        from transformers import AutoTokenizer, AutoModel
+
+        self.model_name = cfg.embedding.model_name
+        self.pooling = getattr(cfg.embedding, "pooling", "mean")
+        self.max_length = cfg.embedding.max_length
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Load frozen BiomedBERT
-        print(f"[FacetEmbedder] Loading {self.model_name}...")
+        print(f"[FacetEmbedder] Loading local model {self.model_name} "
+              f"(pooling={self.pooling})...")
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.model = AutoModel.from_pretrained(self.model_name).to(self.device)
         self.model.eval()
         for param in self.model.parameters():
             param.requires_grad = False
 
+    def _init_api(self, cfg):
+        from openai import AsyncOpenAI
+
+        api_cfg = cfg.embedding.api
+        self.api_model = api_cfg.model
+        self.api_dimensions = getattr(api_cfg, "dimensions", None)
+        self.api_batch_limit = min(getattr(api_cfg, "batch_limit", 32), 32)
+        self.api_concurrency = getattr(api_cfg, "concurrency", 8)
+        self.api_retry_max = getattr(api_cfg, "retry_max", 3)
+        self.api_retry_delay = getattr(api_cfg, "retry_delay", 2)
+
+        base_url = api_cfg.base_url
+        api_key = api_cfg.api_key
+        if isinstance(api_key, str) and api_key.startswith("${"):
+            api_key = os.environ.get("EMBED_API_KEY", "")
+
+        self.async_client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        print(f"[FacetEmbedder] Using API backend: {base_url}  "
+              f"model={self.api_model}  dim={self.api_dimensions}  "
+              f"concurrency={self.api_concurrency}")
+
+    # ------------------------------------------------------------------
+    # Encoding — local
+    # ------------------------------------------------------------------
     @torch.no_grad()
-    def encode_texts(self, texts: List[str]) -> torch.Tensor:
-        """Encode a batch of texts, returning [CLS] token embeddings.
-
-        Args:
-            texts: List of strings (facet descriptions).
-
-        Returns:
-            Tensor of shape (len(texts), embed_dim).
-        """
+    def _encode_local(self, texts: List[str]) -> torch.Tensor:
         encoded = self.tokenizer(
             texts,
             padding=True,
@@ -54,10 +92,77 @@ class FacetEmbedder:
         ).to(self.device)
 
         outputs = self.model(**encoded)
-        # [CLS] token is at index 0 of last_hidden_state
-        cls_embeddings = outputs.last_hidden_state[:, 0, :]  # (batch, D)
-        return cls_embeddings.cpu()
 
+        if self.pooling == "cls":
+            embeddings = outputs.last_hidden_state[:, 0, :]
+        else:
+            mask = encoded["attention_mask"].unsqueeze(-1).float()
+            embeddings = (outputs.last_hidden_state * mask).sum(1) / mask.sum(1)
+
+        return embeddings.cpu()
+
+    # ------------------------------------------------------------------
+    # Encoding — API (async concurrent)
+    # ------------------------------------------------------------------
+    async def _call_embedding_api(
+        self, chunk: List[str], semaphore: asyncio.Semaphore
+    ) -> List[List[float]]:
+        """Single API call for one chunk, with semaphore and retry."""
+        async with semaphore:
+            for attempt in range(1, self.api_retry_max + 1):
+                try:
+                    kwargs = {"model": self.api_model, "input": chunk}
+                    if self.api_dimensions is not None:
+                        kwargs["dimensions"] = self.api_dimensions
+                    resp = await self.async_client.embeddings.create(**kwargs)
+                    sorted_data = sorted(resp.data, key=lambda x: x.index)
+                    return [item.embedding for item in sorted_data]
+                except Exception as e:
+                    if attempt == self.api_retry_max:
+                        raise
+                    wait = self.api_retry_delay * (2 ** (attempt - 1))
+                    print(f"[FacetEmbedder] API error: {e}. "
+                          f"Retry {attempt}/{self.api_retry_max} in {wait}s...")
+                    await asyncio.sleep(wait)
+
+    async def _encode_api_async(self, texts: List[str]) -> torch.Tensor:
+        """Split texts into chunks and call API concurrently."""
+        chunks = [
+            texts[i: i + self.api_batch_limit]
+            for i in range(0, len(texts), self.api_batch_limit)
+        ]
+        semaphore = asyncio.Semaphore(self.api_concurrency)
+
+        results = await asyncio.gather(
+            *(self._call_embedding_api(chunk, semaphore) for chunk in chunks)
+        )
+
+        all_embeddings = []
+        for chunk_result in results:
+            all_embeddings.extend(chunk_result)
+
+        return torch.tensor(all_embeddings, dtype=torch.float32)
+
+    def _encode_api(self, texts: List[str]) -> torch.Tensor:
+        """Sync wrapper around the async API encoder."""
+        return asyncio.run(self._encode_api_async(texts))
+
+    # ------------------------------------------------------------------
+    # Public encode interface
+    # ------------------------------------------------------------------
+    def encode_texts(self, texts: List[str]) -> torch.Tensor:
+        """Encode a batch of texts into fixed-size embeddings.
+
+        Returns:
+            Tensor of shape (len(texts), embed_dim).
+        """
+        if self.backend == "api":
+            return self._encode_api(texts)
+        return self._encode_local(texts)
+
+    # ------------------------------------------------------------------
+    # Build tensor
+    # ------------------------------------------------------------------
     def build_tensor(
         self,
         facets_jsonl_path: str,
@@ -75,7 +180,6 @@ class FacetEmbedder:
             (tensor, gene_to_idx) where tensor has shape (num_genes, K, D)
             and gene_to_idx maps gene_symbol -> row index.
         """
-        # Load facets from JSONL
         gene_facets: Dict[str, Dict[str, str]] = {}
         with open(facets_jsonl_path, "r") as f:
             for line in f:
@@ -84,16 +188,13 @@ class FacetEmbedder:
                     obj = json.loads(line)
                     gene_facets[obj["gene"]] = obj["facets"]
 
-        # Build gene_to_idx mapping
         gene_to_idx = {g: i for i, g in enumerate(gene_order)}
         num_genes = len(gene_order)
 
-        # Initialize output tensor with zeros (NULL facets stay zero)
         tensor = torch.zeros(num_genes, self.num_facets, self.embed_dim)
 
-        # Collect all non-NULL texts with their positions for batch encoding
         texts_to_encode: List[str] = []
-        positions: List[Tuple[int, int]] = []  # (gene_idx, facet_idx)
+        positions: List[Tuple[int, int]] = []
 
         for gene in gene_order:
             gene_idx = gene_to_idx[gene]
@@ -109,22 +210,28 @@ class FacetEmbedder:
             f"for {num_genes} genes..."
         )
 
-        # Batch encode
-        for start in tqdm(
-            range(0, len(texts_to_encode), self.batch_size),
-            desc="Encoding facets",
-        ):
-            end = min(start + self.batch_size, len(texts_to_encode))
-            batch_texts = texts_to_encode[start:end]
-            batch_emb = self.encode_texts(batch_texts)  # (batch, D)
+        if self.backend == "api":
+            # API: encode all at once with async concurrency
+            all_emb = self._encode_api(texts_to_encode)
+            for i, (gene_idx, facet_idx) in enumerate(positions):
+                tensor[gene_idx, facet_idx] = all_emb[i]
+        else:
+            # Local: encode in batches on GPU
+            for start in tqdm(
+                range(0, len(texts_to_encode), self.batch_size),
+                desc="Encoding facets",
+            ):
+                end = min(start + self.batch_size, len(texts_to_encode))
+                batch_texts = texts_to_encode[start:end]
+                batch_emb = self._encode_local(batch_texts)
 
-            for i, (gene_idx, facet_idx) in enumerate(positions[start:end]):
-                tensor[gene_idx, facet_idx] = batch_emb[i]
+                for i, (gene_idx, facet_idx) in enumerate(positions[start:end]):
+                    tensor[gene_idx, facet_idx] = batch_emb[i]
 
         # Save tensor and metadata
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         save_data = {
-            "tensor": tensor,  # (num_genes, K, D)
+            "tensor": tensor,
             "gene_to_idx": gene_to_idx,
             "facet_names": self.facet_names,
         }

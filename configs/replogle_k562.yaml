@@ -10,11 +10,12 @@
 # ========================
 paths:
   gene_info: "data/Homo_sapiens_gene_info_with_go_and_pathways.tsv"
-  facet_output: "data/gene_facets.jsonl"
-  facet_embeddings: "data/gene_facet_embeddings.pt"
+  facet_output: "data/replogle_k562/gene_facets.jsonl"
+  facet_embeddings: "data/replogle_k562/gene_facet_embeddings.pt"
   perturb_data_dir: "data/perturb_data"
   scgpt_checkpoint: "checkpoints/scgpt/whole_human"
   output_dir: "outputs/replogle_k562"
+  kg_dir: "data/kg"
 
 # ========================
 # LLM API (Module 1 - Facet Decomposition)
@@ -97,6 +98,7 @@ training:
   early_stopping_patience: 5
   loss:
     mse_weight: 1.0
+    de_mse_weight: 0.5
     direction_weight: 0.1
   cross_validation:
     enabled: true
@@ -123,3 +125,29 @@ evaluation:
     - "pearson_top20"
     - "pearson_delta_top20"
     - "direction_accuracy"
+
+# ========================
+# KG Text Enrichment (Step 1.5)
+# ========================
+kg_enrichment:
+  enabled: true
+  string_evidence_filter:
+    - "experiments"
+    - "database"
+  max_neighbors: 5
+
+# ========================
+# KG Facet Imputation (Step 4)
+# ========================
+imputation:
+  enabled: true
+  max_neighbors: 20
+  min_informed_neighbors: 2
+  confidence_cap: 0.8
+  num_rounds: 3
+  evidence_weights:
+    experiments: 1.0
+    database: 0.8
+    experiments_transferred: 0.5
+    textmining: 0.3
+    textmining_transferred: 0.2

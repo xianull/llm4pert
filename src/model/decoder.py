@@ -49,13 +49,33 @@ class PerturbationDecoder(nn.Module):
             nn.LayerNorm(self.latent_dim),
         )
 
-        # --- Expression decoder: latent -> full transcriptome ---
+        # --- Expression decoder: latent (with cell skip) -> full transcriptome ---
         self.expression_decoder = nn.Sequential(
-            nn.Linear(self.latent_dim, 512),
+            nn.Linear(self.latent_dim * 2, 512),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(512, num_genes),
+            nn.Linear(512, 1024),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(1024, num_genes),
         )
+
+        # --- Interaction MLP for combinatorial perturbations (P=2) ---
+        self.interaction_mlp = nn.Sequential(
+            nn.Linear(self.latent_dim * 2, self.latent_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.latent_dim, self.latent_dim),
+        )
+
+        # --- ctrl_expression encoder for gate conditioning ---
+        self.ctrl_encoder = nn.Sequential(
+            nn.Linear(num_genes, self.latent_dim),
+            nn.GELU(),
+        )
+
+        # --- Residual gate: conditioned on both pred_latent and ctrl ---
+        self.gate_layer = nn.Linear(self.latent_dim * 2, num_genes)
 
         print(
             f"[PerturbationDecoder] embed_dim={self.embed_dim}, "
@@ -81,9 +101,16 @@ class PerturbationDecoder(nn.Module):
         #    (B, P, D) -> (B, P, latent_dim)
         shifts = self.shift_encoder(dynamic_emb)
 
-        # 2. Sum shifts across perturbations (handles single & combinatorial)
+        # 2. Combine shifts across perturbations
         #    (B, P, latent_dim) -> (B, latent_dim)
-        combined_shift = shifts.sum(dim=1)
+        P = shifts.size(1)
+        if P > 1:
+            # Interaction term for combinatorial perturbations (pairwise)
+            pair_input = torch.cat([shifts[:, 0], shifts[:, 1]], dim=-1)
+            interaction = self.interaction_mlp(pair_input)
+            combined_shift = shifts.sum(dim=1) + interaction
+        else:
+            combined_shift = shifts.sum(dim=1)
 
         # 3. Project cell query to latent space
         #    (B, D) -> (B, latent_dim)
@@ -93,9 +120,14 @@ class PerturbationDecoder(nn.Module):
         pred_latent = cell_latent + combined_shift  # (B, latent_dim)
 
         # 5. Decode to full transcriptome (delta prediction)
-        delta = self.expression_decoder(pred_latent)  # (B, num_genes)
+        #    cell_latent skip connection: provide unmixed cell state to decoder
+        decoder_input = torch.cat([pred_latent, cell_latent], dim=-1)  # (B, latent_dim*2)
+        delta = self.expression_decoder(decoder_input)  # (B, num_genes)
 
-        # 6. Residual: predicted = control + delta
-        pred_expression = ctrl_expression + delta
+        # 6. Residual gate: conditioned on perturbation latent + baseline expression
+        ctrl_encoded = self.ctrl_encoder(ctrl_expression)  # (B, latent_dim)
+        gate_input = torch.cat([pred_latent, ctrl_encoded], dim=-1)  # (B, latent_dim*2)
+        gate = torch.sigmoid(self.gate_layer(gate_input))  # (B, num_genes)
+        pred_expression = ctrl_expression + gate * delta
 
         return pred_expression

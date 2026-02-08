@@ -69,14 +69,14 @@ class DyGenePT(nn.Module):
             gene_ids, values, padding_mask
         )  # (B, D)
 
-        # Module 1: Gene facet lookup
-        gene_facets = self.gene_encoder(
+        # Module 1: Gene facet lookup (returns confidence if available)
+        gene_facets, confidence = self.gene_encoder(
             pert_gene_indices
-        )  # (B, P, K, D)
+        )  # (B, P, K, D), optional (B, P, K)
 
-        # Module 3: Cross-attention
+        # Module 3: Cross-attention (with confidence bias if available)
         dynamic_emb, attn_weights = self.cross_attention(
-            cell_query, gene_facets
+            cell_query, gene_facets, confidence
         )  # (B, P, D), (B, P, H, K)
 
         # Module 4: Decode prediction

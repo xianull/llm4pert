@@ -1,21 +1,16 @@
-# DyGenePT Configuration — Replogle RPE1 Essential
-# For fair comparison with LangPert (ICLR 2025 MLGenX)
-#
-# Usage:
-#   python -m src.train --config configs/replogle_rpe1.yaml
-#   python -m src.train_cv --config configs/replogle_rpe1.yaml  # 5-fold CV
+# DyGenePT Configuration — Large Model
+# Compared to default.yaml: deeper decoder, more heads, scGPT fine-tuned
 
 # ========================
 # Paths
 # ========================
 paths:
   gene_info: "data/Homo_sapiens_gene_info_with_go_and_pathways.tsv"
-  facet_output: "data/replogle_rpe1/gene_facets.jsonl"
-  facet_embeddings: "data/replogle_rpe1/gene_facet_embeddings.pt"
+  facet_output: "data/gene_facets.jsonl"
+  facet_embeddings: "data/gene_facet_embeddings.pt"
   perturb_data_dir: "data/perturb_data"
   scgpt_checkpoint: "checkpoints/scgpt/whole_human"
-  output_dir: "outputs/replogle_rpe1"
-  kg_dir: "data/kg"
+  output_dir: "outputs/large"
 
 # ========================
 # LLM API (Module 1 - Facet Decomposition)
@@ -25,8 +20,8 @@ llm:
   api_key: "${oc.env:LLM_API_KEY}"
   model: "gemini-3-pro-preview"
   temperature: 0.3
-  max_tokens: 2048
-  batch_size: 5
+  max_tokens: 8192
+  batch_size: 32
   retry_max: 3
   retry_delay: 2
 
@@ -60,14 +55,14 @@ embedding:
 cell_encoder:
   model_name: "scGPT"
   embed_dim: 512
-  freeze_layers: -2
+  freeze_layers: -4           # 解冻最后 4 层
   max_seq_len: 3000
 
 # ========================
 # Cross-Attention (Module 3)
 # ========================
 cross_attention:
-  num_heads: 8
+  num_heads: 12
   hidden_dim: 768
   dropout: 0.1
 
@@ -75,7 +70,7 @@ cross_attention:
 # Perturbation Decoder (Module 4)
 # ========================
 decoder:
-  hidden_dims: [512, 256]
+  hidden_dims: [1024, 512, 256]
   dropout: 0.1
   use_gene_graph: false
   num_go_layers: 2
@@ -84,14 +79,14 @@ decoder:
 # Training
 # ========================
 training:
-  dataset: "replogle_rpe1_essential"
+  dataset: "norman"
   seed: 42
-  epochs: 15
+  epochs: 20
   batch_size: 64
   lr: 1.0e-4
   weight_decay: 1.0e-5
   scheduler: "cosine"
-  warmup_steps: 500
+  warmup_steps: 200
   gradient_clip: 1.0
   eval_every: 1
   save_best: true
@@ -101,7 +96,7 @@ training:
     de_mse_weight: 0.5
     direction_weight: 0.1
   cross_validation:
-    enabled: true
+    enabled: false
     n_folds: 5
     split_mode: "simulation"
 
@@ -109,6 +104,14 @@ training:
 # Dataset-specific settings
 # ========================
 dataset_configs:
+  norman:
+    data_name: "norman"
+    split_mode: "simulation"
+    single_gene_only: false
+  replogle_k562_essential:
+    data_name: "replogle_k562_essential"
+    split_mode: "simulation"
+    single_gene_only: true
   replogle_rpe1_essential:
     data_name: "replogle_rpe1_essential"
     split_mode: "simulation"
@@ -125,29 +128,3 @@ evaluation:
     - "pearson_top20"
     - "pearson_delta_top20"
     - "direction_accuracy"
-
-# ========================
-# KG Text Enrichment (Step 1.5)
-# ========================
-kg_enrichment:
-  enabled: true
-  string_evidence_filter:
-    - "experiments"
-    - "database"
-  max_neighbors: 5
-
-# ========================
-# KG Facet Imputation (Step 4)
-# ========================
-imputation:
-  enabled: true
-  max_neighbors: 20
-  min_informed_neighbors: 2
-  confidence_cap: 0.8
-  num_rounds: 3
-  evidence_weights:
-    experiments: 1.0
-    database: 0.8
-    experiments_transferred: 0.5
-    textmining: 0.3
-    textmining_transferred: 0.2

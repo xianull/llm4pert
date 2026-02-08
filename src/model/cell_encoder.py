@@ -12,6 +12,40 @@ import torch.nn as nn
 import numpy as np
 
 
+class AttentionPooling(nn.Module):
+    """Learned attention pooling over sequence tokens.
+
+    A single learnable query attends to all tokens in the sequence,
+    producing a weighted summary that captures global patterns beyond
+    what the CLS token alone encodes.
+    """
+
+    def __init__(self, d_model: int):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        self.key_proj = nn.Linear(d_model, d_model)
+        self.scale = d_model ** -0.5
+
+    def forward(self, x: torch.Tensor, padding_mask: torch.BoolTensor = None) -> torch.Tensor:
+        """
+        Args:
+            x: (B, L, D) sequence of token embeddings.
+            padding_mask: (B, L) True = masked (padding) positions.
+
+        Returns:
+            pooled: (B, D) attention-weighted summary.
+        """
+        B = x.size(0)
+        query = self.query.expand(B, -1, -1)                    # (B, 1, D)
+        keys = self.key_proj(x)                                   # (B, L, D)
+        scores = (query @ keys.transpose(-2, -1)) * self.scale   # (B, 1, L)
+        if padding_mask is not None:
+            scores = scores.masked_fill(padding_mask.unsqueeze(1), float('-inf'))
+        weights = torch.softmax(scores, dim=-1)                   # (B, 1, L)
+        pooled = (weights @ x).squeeze(1)                         # (B, D)
+        return pooled
+
+
 class CellEncoder(nn.Module):
     """Encodes cell expression profiles using frozen scGPT, then projects
     from scGPT's d_model (e.g. 512) to cross-attention dimension (768).
@@ -102,9 +136,17 @@ class CellEncoder(nn.Module):
         # ------------------------------------------------------------------
         self.projection = nn.Sequential(
             nn.Linear(self.scgpt_dim, target_dim),
-            nn.ReLU(),
+            nn.GELU(),
+            nn.LayerNorm(target_dim),
+            nn.Linear(target_dim, target_dim),
+            nn.GELU(),
             nn.LayerNorm(target_dim),
         )
+
+        # ------------------------------------------------------------------
+        # 7. Attention pooling for richer cell representation
+        # ------------------------------------------------------------------
+        self.attn_pool = AttentionPooling(self.scgpt_dim)
 
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.parameters())
@@ -236,14 +278,26 @@ class CellEncoder(nn.Module):
     ) -> torch.Tensor:
         """Run scGPT encoder and project to cross-attention dimension.
 
+        Uses the full transformer output (B, L, d_model) for both
+        CLS token extraction and attention pooling, then combines
+        them via residual addition for a richer cell representation.
+
         Returns:
             cell_query: (B, target_dim) projected cell embedding.
         """
-        output = self.scgpt(
-            src=gene_ids,
-            values=values,
-            src_key_padding_mask=padding_mask,
-        )
-        cell_emb = output["cell_emb"]  # (B, scgpt_dim)
+        # Get full transformer output (not just CLS)
+        transformer_output = self.scgpt._encode(
+            gene_ids, values, padding_mask
+        )  # (B, L, scgpt_dim)
+
+        # CLS token at position 0
+        cls_emb = transformer_output[:, 0, :]  # (B, scgpt_dim)
+
+        # Attention pooling over all gene tokens
+        pooled = self.attn_pool(transformer_output, padding_mask)  # (B, scgpt_dim)
+
+        # Combine: CLS + pooled (residual)
+        cell_emb = cls_emb + pooled
+
         cell_query = self.projection(cell_emb)  # (B, target_dim)
         return cell_query

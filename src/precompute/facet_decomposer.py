@@ -8,6 +8,8 @@ from typing import Dict, List, Tuple, Set
 from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm_asyncio
 
+from src.precompute.llm_utils import extract_json_from_llm_response
+
 # Facet names (must match config)
 DEFAULT_FACET_NAMES = [
     "Transcriptional Regulation",
@@ -91,23 +93,7 @@ class FacetDecomposer:
                 )
 
                 raw = response.choices[0].message.content.strip()
-
-                # Extract JSON from potential markdown code block
-                if raw.startswith("```"):
-                    lines = raw.split("\n")
-                    json_lines = []
-                    inside = False
-                    for line in lines:
-                        if line.startswith("```") and not inside:
-                            inside = True
-                            continue
-                        elif line.startswith("```") and inside:
-                            break
-                        elif inside:
-                            json_lines.append(line)
-                    raw = "\n".join(json_lines)
-
-                facets = json.loads(raw)
+                facets = extract_json_from_llm_response(raw)
 
                 # Validate keys
                 result = {}

@@ -49,11 +49,15 @@ class FacetCrossAttention(nn.Module):
         self,
         cell_query: torch.Tensor,    # (B, D)
         gene_facets: torch.Tensor,   # (B, P, K, D)
+        confidence: torch.Tensor = None,  # (B, P, K) optional
     ) -> tuple:
         """
         Args:
             cell_query:  Cell state embedding from CellEncoder.  (B, D)
             gene_facets: Facet embeddings for perturbed gene(s).  (B, P, K, D)
+            confidence:  Optional confidence scores from KG imputation. (B, P, K)
+                         1.0=native, (0,0.8]=imputed, 0.0=still NULL.
+                         Used as log-space bias on attention scores.
 
         Returns:
             dynamic_emb:       (B, P, D)          context-aware gene embeddings
@@ -82,6 +86,15 @@ class FacetCrossAttention(nn.Module):
         # scores = Q @ K^T / sqrt(d)  ->  (B, P, H, 1, K) -> squeeze -> (B, P, H, K)
         scores = torch.matmul(Q_exp, K.transpose(-2, -1)).squeeze(-2)
         scores = scores / math.sqrt(d)
+
+        # --- Confidence bias ---
+        # Imputed facets get lower attention via log(confidence) additive bias.
+        # Native facets (conf=1.0) get bias=0, imputed get negative bias,
+        # NULL facets (conf≈0) get strongly negative bias.
+        if confidence is not None:
+            # (B, P, K) -> (B, P, 1, K) to broadcast over H heads
+            conf_bias = torch.log(confidence.clamp(min=1e-6)).unsqueeze(2)
+            scores = scores + conf_bias
 
         # --- Sparsemax attention ---
         # Apply sparsemax over the K (facet) dimension
