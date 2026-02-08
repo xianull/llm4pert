@@ -25,8 +25,8 @@ llm:
   api_key: "${oc.env:LLM_API_KEY}"
   model: "gemini-3-pro-preview"
   temperature: 0.3
-  max_tokens: 2048
-  batch_size: 5
+  max_tokens: 8192
+  batch_size: 128
   retry_max: 3
   retry_delay: 2
 

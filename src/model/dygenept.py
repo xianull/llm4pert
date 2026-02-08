@@ -247,11 +247,15 @@ class DyGenePT(nn.Module):
         )
         aligned_facets = self._build_aligned_facets(num_genes, gene_names)
 
+        # Use actual K from loaded tensor (may differ from config if
+        # precompute was run with a different facet count)
+        actual_k = self.gene_encoder.num_facets
+
         # Module 3: Semantic cross-attention (pert → genome)
         topk = getattr(cfg.cross_attention, 'topk', 200)
         self.cross_attention = SemanticCrossAttention(
             embed_dim=target_dim,
-            num_facets=num_facets,
+            num_facets=actual_k,
             dropout=cfg.cross_attention.dropout,
             topk=topk,
         )

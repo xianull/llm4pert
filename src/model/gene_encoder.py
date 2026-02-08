@@ -31,7 +31,6 @@ class GeneEncoder(nn.Module):
         adapter_hidden_dims: list = None,
     ):
         super().__init__()
-        self.num_facets = num_facets
         self.embed_dim = embed_dim
 
         # Load saved data: {"tensor": ..., "gene_to_idx": ..., "facet_names": ..., "confidence": ...}
@@ -44,6 +43,16 @@ class GeneEncoder(nn.Module):
             self.register_buffer("facet_tensor", saved["tensor"])  # (G, K, D)
         else:
             self.facet_tensor = nn.Parameter(saved["tensor"])
+
+        # Derive actual num_facets from loaded tensor (may differ from config
+        # if precompute was run with a different facet count)
+        actual_k = self.facet_tensor.shape[1]
+        if actual_k != num_facets:
+            print(
+                f"[GeneEncoder] WARNING: config num_facets={num_facets} but "
+                f"loaded tensor has K={actual_k}. Using K={actual_k} from tensor."
+            )
+        self.num_facets = actual_k
 
         # Load confidence mask if present (from KG imputation)
         if "confidence" in saved:
@@ -59,7 +68,7 @@ class GeneEncoder(nn.Module):
 
         # Learnable null embedding for unknown genes (index = -1)
         self.null_embedding = nn.Parameter(
-            torch.randn(1, num_facets, embed_dim) * 0.01
+            torch.randn(1, self.num_facets, embed_dim) * 0.01
         )
 
         # Learnable adapter to fine-tune frozen embeddings for downstream task
@@ -82,7 +91,7 @@ class GeneEncoder(nn.Module):
 
         print(
             f"[GeneEncoder] Loaded {self.facet_tensor.shape[0]} genes, "
-            f"{num_facets} facets, dim={embed_dim}, freeze={freeze}"
+            f"{self.num_facets} facets, dim={embed_dim}, freeze={freeze}"
         )
 
     def gene_symbols_to_indices(self, gene_symbols: list) -> torch.LongTensor:
