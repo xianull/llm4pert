@@ -104,6 +104,7 @@ decoder:
   dropout: 0.1
   gene_embed_aware: true
   gene_embed_dim: 512
+  gene_embed_lr_scale: 0.1
   use_gene_graph: false
   num_go_layers: 2
 

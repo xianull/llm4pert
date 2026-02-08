@@ -1,8 +1,7 @@
-"""Module 3: Context-Aware Cross-Attention with Sparsemax.
+"""Module 3: Cross-Attention modules.
 
-The cell query vector attends over K gene facets to produce a dynamic,
-cell-context-specific gene embedding. Sparsemax replaces softmax for
-interpretable, sparse attention weights.
+V1: FacetCrossAttention — cell query attends over K gene facets (sparsemax).
+V2: SemanticCrossAttention — context-aware pert gene attends over entire genome.
 """
 
 import math
@@ -123,3 +122,90 @@ class FacetCrossAttention(nn.Module):
         out = self.layer_norm(out)
 
         return out, alpha
+
+
+class SemanticCrossAttention(nn.Module):
+    """V2: Context-aware perturbed gene facets attend over all genome genes.
+
+    Q = W_Q(context_Q)           ->  (B, P, K, D)   context-aware pert facets
+    K = W_K(genome_facets)       ->  (G, K, D)       all genes' static facets
+    sim = einsum(Q, K)           ->  (B, P, K, G)    per-facet similarity
+    impact = combine(sim, w)     ->  (B, P, G)       weighted facet aggregation
+    impact = topk_sparse(impact) ->  (B, P, G)       sparse impact scores
+
+    Unlike V1 which attends over 8 facets of the perturbed gene,
+    V2 attends over the entire genome to compute a direct impact map.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int = 768,
+        num_facets: int = 8,
+        dropout: float = 0.1,
+        topk: int = 200,
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_facets = num_facets
+        self.topk = topk
+
+        self.W_Q = nn.Linear(embed_dim, embed_dim)
+        self.W_K = nn.Linear(embed_dim, embed_dim)
+
+        # Learnable facet channel weights (which facets matter more)
+        self.facet_weights = nn.Parameter(
+            torch.ones(num_facets) / num_facets
+        )
+
+        self.scale = embed_dim ** -0.5
+        self.dropout = nn.Dropout(dropout)
+
+        print(
+            f"[SemanticCrossAttention] embed_dim={embed_dim}, "
+            f"num_facets={num_facets}, topk={topk}"
+        )
+
+    def forward(
+        self,
+        context_Q: torch.Tensor,            # (B, P, K, D)
+        genome_facets: torch.Tensor,         # (G, K, D)  frozen buffer
+        confidence: torch.Tensor = None,     # (B, P, K)  optional
+    ) -> tuple:
+        """
+        Args:
+            context_Q:      FiLM-conditioned perturbed gene facets.
+            genome_facets:  Static facet embeddings for ALL genes (frozen).
+            confidence:     KG imputation confidence for pert gene facets.
+
+        Returns:
+            impact_scores:  (B, P, G) per-gene impact from each perturbation.
+            facet_weights:  (K,) normalized facet channel weights.
+        """
+        # Project Q and K
+        Q = self.W_Q(context_Q)      # (B, P, K, D)
+        K = self.W_K(genome_facets)   # (G, K, D)
+
+        # Per-facet channel similarity via einsum
+        # (B, P, K, D) × (G, K, D) -> (B, P, K, G)
+        sim = torch.einsum('bpkd,gkd->bpkg', Q, K) * self.scale
+
+        # Confidence bias: imputed Q-side facets get lower attention
+        if confidence is not None:
+            conf_bias = torch.log(confidence.clamp(min=1e-6))  # (B, P, K)
+            sim = sim + conf_bias.unsqueeze(-1)  # (B, P, K, 1) broadcast over G
+
+        # Learned facet combination: weighted sum over K channels
+        w = torch.softmax(self.facet_weights, dim=0)  # (K,)
+        impact = torch.einsum('bpkg,k->bpg', sim, w)  # (B, P, G)
+
+        # Top-k sparsification with straight-through gradient
+        if self.topk > 0 and self.topk < impact.size(-1):
+            _, topk_idx = impact.topk(self.topk, dim=-1)       # (B, P, topk)
+            mask = torch.zeros_like(impact)
+            mask.scatter_(-1, topk_idx, 1.0)
+            # Straight-through: gradient flows through impact, mask is detached
+            impact = impact * mask.detach()
+
+        impact = self.dropout(impact)
+
+        return impact, w

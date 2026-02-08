@@ -142,9 +142,29 @@ def train_one_fold(
         pin_memory=True,
     )
 
+    # Separate parameter groups: gene_embed_proj gets lower lr
+    gene_embed_proj_params = []
+    other_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "gene_embed_proj" in name:
+            gene_embed_proj_params.append(param)
+        else:
+            other_params.append(param)
+
+    gene_embed_lr_scale = float(getattr(cfg.decoder, 'gene_embed_lr_scale', 0.1))
+    param_groups = [
+        {"params": other_params, "lr": cfg.training.lr},
+    ]
+    if gene_embed_proj_params:
+        param_groups.append({
+            "params": gene_embed_proj_params,
+            "lr": cfg.training.lr * gene_embed_lr_scale,
+        })
+
     optimizer = AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=cfg.training.lr,
+        param_groups,
         weight_decay=cfg.training.weight_decay,
     )
 

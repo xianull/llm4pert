@@ -7,6 +7,7 @@ Predicts post-perturbation expression via:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class PerturbationDecoder(nn.Module):
@@ -72,12 +73,25 @@ class PerturbationDecoder(nn.Module):
             self.effect_proj = nn.Linear(backbone_hidden, d_out)
             self.gene_bias = nn.Parameter(torch.zeros(num_genes))
 
+            # Learnable temperature for scaled dot-product
+            self.logit_scale = nn.Parameter(torch.tensor(1.0 / (d_out ** 0.5)))
+
             # Project gene facet embeddings -> gene_embeddings
             assert gene_facet_tensor is not None, (
                 "gene_facet_tensor is required when gene_embed_aware=True"
             )
             # gene_facet_tensor: (G, K, 768) -> mean pool -> (G, 768)
             gene_mean = gene_facet_tensor.mean(dim=1)  # (G, 768)
+
+            # Identify unmatched genes (all-zero rows from alignment)
+            unmatched_mask = gene_mean.norm(dim=-1) == 0  # (G,)
+            self.register_buffer("_unmatched_mask", unmatched_mask)
+
+            # Learnable fallback embedding for unmatched genes
+            self._fallback_raw = nn.Parameter(
+                torch.randn(1, gene_facet_tensor.shape[-1]) * 0.02
+            )
+
             self.register_buffer("_gene_mean", gene_mean)  # frozen raw embeddings
 
             self.gene_embed_proj = nn.Sequential(
@@ -86,9 +100,10 @@ class PerturbationDecoder(nn.Module):
                 nn.LayerNorm(d_out),
             )
 
+            num_unmatched = int(unmatched_mask.sum().item())
             print(
                 f"[PerturbationDecoder] gene_embed_aware=True, d_out={d_out}, "
-                f"gene_mean={gene_mean.shape}"
+                f"gene_mean={gene_mean.shape}, unmatched={num_unmatched}"
             )
         else:
             self.expression_decoder = nn.Sequential(
@@ -153,8 +168,19 @@ class PerturbationDecoder(nn.Module):
         if self.gene_embed_aware:
             h = self.expression_backbone(decoder_input)       # (B, 1024)
             effect = self.effect_proj(h)                       # (B, d_out)
-            gene_emb = self.gene_embed_proj(self._gene_mean)   # (G, d_out)
-            delta = effect @ gene_emb.t() + self.gene_bias     # (B, G)
+
+            # Build gene embeddings: replace unmatched zeros with fallback
+            gene_raw = self._gene_mean.clone()
+            if self._unmatched_mask.any():
+                gene_raw[self._unmatched_mask] = self._fallback_raw.expand(
+                    int(self._unmatched_mask.sum()), -1
+                )
+            gene_emb = self.gene_embed_proj(gene_raw)          # (G, d_out)
+
+            # L2-normalize + learnable temperature for stable dot-product
+            effect_norm = F.normalize(effect, dim=-1)          # (B, d_out)
+            gene_emb_norm = F.normalize(gene_emb, dim=-1)      # (G, d_out)
+            delta = self.logit_scale * (effect_norm @ gene_emb_norm.t()) + self.gene_bias
         else:
             delta = self.expression_decoder(decoder_input)    # (B, G)
 
@@ -164,4 +190,64 @@ class PerturbationDecoder(nn.Module):
         gate = torch.sigmoid(self.gate_layer(gate_input))  # (B, num_genes)
         pred_expression = ctrl_expression + gate * delta
 
+        return pred_expression
+
+
+class PerturbationDecoderV2(nn.Module):
+    """V2 decoder: direct impact map → gated prediction.
+
+    The SemanticCrossAttention already produces per-gene impact scores,
+    so the decoder only needs to scale and gate them.
+
+    Architecture:
+      magnitude = MLP(cell_emb)           -> (B, 1) global scale
+      gate = sigmoid(MLP(ctrl_expression)) -> (B, G) per-gene gate
+      pred = ctrl + gate * impact * magnitude
+    """
+
+    def __init__(
+        self,
+        embed_dim: int = 768,
+        num_genes: int = 5000,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_genes = num_genes
+
+        # Magnitude: cell state → global perturbation strength
+        self.magnitude_net = nn.Sequential(
+            nn.Linear(embed_dim, 256),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, 1),
+        )
+
+        # Gate: ctrl expression → per-gene activation filter
+        self.gate_net = nn.Sequential(
+            nn.Linear(num_genes, 1024),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(1024, num_genes),
+        )
+
+        trainable = sum(p.numel() for p in self.parameters())
+        print(
+            f"[PerturbationDecoderV2] embed_dim={embed_dim}, "
+            f"num_genes={num_genes}, trainable={trainable:,}"
+        )
+
+    def forward(
+        self,
+        impact_map: torch.Tensor,        # (B, G)
+        cell_emb: torch.Tensor,           # (B, D)
+        ctrl_expression: torch.Tensor,    # (B, G)
+    ) -> torch.Tensor:
+        """
+        Returns:
+            pred_expression: (B, G) predicted post-perturbation expression.
+        """
+        magnitude = self.magnitude_net(cell_emb)                  # (B, 1)
+        gate = torch.sigmoid(self.gate_net(ctrl_expression))      # (B, G)
+        pred_expression = ctrl_expression + gate * impact_map * magnitude
         return pred_expression

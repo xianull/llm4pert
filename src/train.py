@@ -67,19 +67,22 @@ def compute_loss(
     mse_weight: float = 1.0,
     de_mse_weight: float = 0.5,
     direction_weight: float = 0.1,
+    rank_weight: float = 0.0,
 ) -> dict:
-    """Combined MSE + DE-focused MSE + direction loss.
+    """Combined MSE + DE-focused MSE + direction loss + ranking loss.
 
     MSE loss:       on all genes.
     DE MSE loss:    focused MSE on top DE genes only.
     Direction loss:  on top DE genes, ensuring predicted direction of change
                      (up/down relative to control) matches ground truth.
+    Rank loss:      encourages the model to rank truly changed genes higher
+                     than unchanged ones (margin ranking on deltas).
     """
     # Global MSE
     loss_mse = nn.functional.mse_loss(pred, target)
 
     # Direction loss and DE-focused MSE on DE genes
-    if (de_mse_weight > 0 or direction_weight > 0) and de_idx_len.sum() > 0:
+    if (de_mse_weight > 0 or direction_weight > 0 or rank_weight > 0) and de_idx_len.sum() > 0:
         # Clamp de_idx to valid range to prevent OOB on gather
         de_idx = de_idx.clamp(0, pred.shape[1] - 1)
 
@@ -112,12 +115,68 @@ def compute_loss(
             loss_dir = (loss_dir * mask.float()).sum() / mask.float().sum().clamp(min=1)
         else:
             loss_dir = torch.tensor(0.0, device=pred.device)
+
+        # Ranking loss: DE genes should have larger |delta| than non-DE genes
+        if rank_weight > 0:
+            loss_rank = _compute_rank_loss(pred, target, ctrl_expression, de_idx, mask)
+        else:
+            loss_rank = torch.tensor(0.0, device=pred.device)
     else:
         loss_de_mse = torch.tensor(0.0, device=pred.device)
         loss_dir = torch.tensor(0.0, device=pred.device)
+        loss_rank = torch.tensor(0.0, device=pred.device)
 
-    total = mse_weight * loss_mse + de_mse_weight * loss_de_mse + direction_weight * loss_dir
-    return {"total": total, "mse": loss_mse, "de_mse": loss_de_mse, "direction": loss_dir}
+    total = (
+        mse_weight * loss_mse
+        + de_mse_weight * loss_de_mse
+        + direction_weight * loss_dir
+        + rank_weight * loss_rank
+    )
+    return {
+        "total": total, "mse": loss_mse, "de_mse": loss_de_mse,
+        "direction": loss_dir, "rank": loss_rank,
+    }
+
+
+def _compute_rank_loss(
+    pred: torch.Tensor,            # (B, G)
+    target: torch.Tensor,          # (B, G)
+    ctrl_expression: torch.Tensor, # (B, G)
+    de_idx: torch.LongTensor,     # (B, top_de)
+    de_mask: torch.BoolTensor,    # (B, top_de)
+    margin: float = 0.5,
+    n_neg_samples: int = 50,
+) -> torch.Tensor:
+    """Margin ranking loss: |pred_delta| for DE genes > |pred_delta| for non-DE genes.
+
+    For each DE gene, sample random non-DE genes and enforce that the
+    predicted |delta| of the DE gene exceeds that of the non-DE gene by margin.
+    """
+    B, G = pred.shape
+    device = pred.device
+
+    pred_delta = (pred - ctrl_expression).abs()      # (B, G)
+    target_delta = (target - ctrl_expression).abs()   # (B, G)
+
+    # DE genes' predicted |delta|
+    pred_de_delta = pred_delta.gather(1, de_idx)      # (B, top_de)
+
+    # Sample random non-DE gene indices
+    rand_idx = torch.randint(0, G, (B, n_neg_samples), device=device)  # (B, n_neg)
+    pred_neg_delta = pred_delta.gather(1, rand_idx)    # (B, n_neg)
+
+    # Pairwise margin ranking: each DE gene vs each neg sample
+    # pos: (B, top_de, 1), neg: (B, 1, n_neg) -> (B, top_de, n_neg)
+    pos = pred_de_delta.unsqueeze(-1)                  # (B, top_de, 1)
+    neg = pred_neg_delta.unsqueeze(1)                   # (B, 1, n_neg)
+
+    # hinge loss: max(0, margin - (pos - neg))
+    rank_loss = torch.clamp(margin - (pos - neg), min=0)  # (B, top_de, n_neg)
+
+    # Mask out padded DE positions
+    rank_loss = rank_loss * de_mask.unsqueeze(-1).float()  # (B, top_de, n_neg)
+
+    return rank_loss.sum() / (de_mask.float().sum() * n_neg_samples).clamp(min=1)
 
 
 # =====================================================================
@@ -337,9 +396,35 @@ def train(cfg):
     # ------------------------------------------------------------------
     # 5. Optimizer and scheduler
     # ------------------------------------------------------------------
+    # Separate parameter groups: gene_embed_proj gets lower lr to preserve
+    # pre-trained semantic structure from BioLORD embeddings
+    gene_embed_proj_params = []
+    other_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "gene_embed_proj" in name:
+            gene_embed_proj_params.append(param)
+        else:
+            other_params.append(param)
+
+    gene_embed_lr_scale = float(getattr(cfg.decoder, 'gene_embed_lr_scale', 0.1))
+    param_groups = [
+        {"params": other_params, "lr": cfg.training.lr},
+    ]
+    if gene_embed_proj_params:
+        param_groups.append({
+            "params": gene_embed_proj_params,
+            "lr": cfg.training.lr * gene_embed_lr_scale,
+        })
+        if is_main_process(rank):
+            logger.info(
+                f"gene_embed_proj lr = {cfg.training.lr * gene_embed_lr_scale:.2e} "
+                f"(scale={gene_embed_lr_scale})"
+            )
+
     optimizer = AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=cfg.training.lr,
+        param_groups,
         weight_decay=cfg.training.weight_decay,
     )
 
@@ -428,6 +513,7 @@ def train(cfg):
                 mse_weight=cfg.training.loss.mse_weight,
                 de_mse_weight=cfg.training.loss.de_mse_weight,
                 direction_weight=cfg.training.loss.direction_weight,
+                rank_weight=float(getattr(cfg.training.loss, 'rank_weight', 0.0)),
             )
 
             # Backward

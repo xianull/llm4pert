@@ -1,6 +1,13 @@
 # DyGenePT Configuration
 
 # ========================
+# Architecture Version
+# ========================
+# "v1": legacy (cell_query attends over pert gene facets)
+# "v2": context-aware semantic cross-attention (pert gene attends over genome)
+architecture_version: "v2"
+
+# ========================
 # Paths
 # ========================
 paths:
@@ -65,36 +72,43 @@ embedding:
   embed_dim: 768
 
 # ========================
-# Cell Encoder (Module 2 - scGPT)
+# Cell Encoder (Module 2)
 # ========================
 cell_encoder:
-  model_name: "scGPT"
+  model_name: "mlp"            # v2 default: "mlp"; v1: "scGPT"
   embed_dim: 512
-  freeze_layers: -2        # 冻结除最后 2 层外的所有层
-  max_seq_len: 3000         # 最大基因数
+  freeze_layers: -2            # v1 only: 冻结除最后 2 层外的所有层
+  max_seq_len: 3000            # v1 only: 最大基因数
 
 # ========================
-# Perturbation-Aware Cell Encoding (PACE)
+# Perturbation-Aware Cell Encoding (PACE) — v1 only
 # ========================
 pert_aware_cell_encoding:
-  enabled: true
-  n_pert_categories: 3       # 0=not_perturbed, 1=perturbed, 2=padding
+  enabled: false               # v2 不需要 PACE
+  n_pert_categories: 3
   padding_idx: 2
-  force_include_pert_genes: true   # 强制将被扰动基因纳入 scGPT token 序列
+  force_include_pert_genes: true
+
+# ========================
+# Contextualizer (Module 2.5) — v2 only
+# ========================
+contextualizer:
+  dropout: 0.1
 
 # ========================
 # Cross-Attention (Module 3)
 # ========================
 cross_attention:
-  num_heads: 8
-  hidden_dim: 768           # 与 PubMedBERT 维度对齐
+  num_heads: 8                 # v1 only
+  hidden_dim: 768
   dropout: 0.1
+  topk: 200                    # v2 only: 保留 top-k 个基因
 
 # ========================
-# Perturbation Type Encoding
+# Perturbation Type Encoding — v2 disabled (CRISPRi only)
 # ========================
 perturbation_type:
-  enabled: true
+  enabled: false
   num_types: 3            # 0=activation (CRISPRa), 1=repression (CRISPRi), 2=knockout (CRISPR-KO)
   type_names:
     - "activation"
@@ -109,6 +123,7 @@ decoder:
   dropout: 0.1
   gene_embed_aware: true
   gene_embed_dim: 512
+  gene_embed_lr_scale: 0.1     # gene_embed_proj 学习率 = lr * scale
   use_gene_graph: false      # GO graph (未实现，保留为扩展项)
   num_go_layers: 2
 
@@ -130,8 +145,9 @@ training:
   early_stopping_patience: 3
   loss:
     mse_weight: 1.0
-    de_mse_weight: 0.5           # DE-focused MSE on top DE genes
-    direction_weight: 0.1     # top DE genes direction loss
+    de_mse_weight: 2.0           # DE-focused MSE on top DE genes (加强)
+    direction_weight: 0.5        # top DE genes direction loss (加强)
+    rank_weight: 0.5             # v2: margin ranking loss — DE genes 应排在前面
   # Data augmentation
   pert_gene_dropout: 0.25      # 组合扰动中随机 drop 一个基因的概率 (0=禁用)
   # Cross-validation settings (for K562/RPE1 LangPert comparison)
