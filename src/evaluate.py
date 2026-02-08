@@ -26,6 +26,7 @@ from torch.utils.data import DataLoader
 METRIC_NAMES = [
     "mse",
     "mae",
+    "pearson_delta_all",
     "pearson_top20",
     "pearson_delta_top20",
     "direction_accuracy",
@@ -42,6 +43,15 @@ def _compute_pert_metrics(
     """Compute all metrics for a single perturbation (already cell-averaged)."""
     mse = float(np.mean((mean_pred - mean_truth) ** 2))
 
+    # --- Full-gene delta Pearson (all ~5000 genes) ---
+    pred_delta_all = mean_pred - mean_ctrl
+    true_delta_all = mean_truth - mean_ctrl
+    if np.std(pred_delta_all) > 0 and np.std(true_delta_all) > 0:
+        r_delta_all, _ = pearsonr(pred_delta_all, true_delta_all)
+    else:
+        r_delta_all = 0.0
+
+    # --- Top-DE gene metrics ---
     de_genes = de_idx[:de_len]
     pred_de = mean_pred[de_genes]
     truth_de = mean_truth[de_genes]
@@ -66,6 +76,7 @@ def _compute_pert_metrics(
     return {
         "mse": mse,
         "mae": mae_delta,
+        "pearson_delta_all": r_delta_all,
         "pearson_top20": r,
         "pearson_delta_top20": r_delta,
         "direction_accuracy": dir_acc,
@@ -157,6 +168,7 @@ def evaluate_model(
             pert_gene_indices = batch["pert_gene_indices"].to(device, non_blocking=True)
             ctrl_expression = batch["ctrl_expression"].to(device, non_blocking=True)
             pert_type_ids = batch["pert_type_ids"].to(device, non_blocking=True) if "pert_type_ids" in batch else None
+            pert_flags = batch["pert_flags"].to(device, non_blocking=True) if "pert_flags" in batch else None
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 output = model(
@@ -166,6 +178,7 @@ def evaluate_model(
                     pert_gene_indices=pert_gene_indices,
                     ctrl_expression=ctrl_expression,
                     pert_type_ids=pert_type_ids,
+                    pert_flags=pert_flags,
                 )
 
             pred = output["pred_expression"].cpu().numpy()
@@ -244,23 +257,24 @@ def format_subgroup_table(metrics: Dict[str, float]) -> str:
         return ""
 
     lines = []
-    lines.append("=" * 90)
+    lines.append("=" * 104)
     lines.append("Per-Subgroup Evaluation Breakdown")
-    lines.append("=" * 90)
+    lines.append("=" * 104)
 
     header = f"{'Subgroup':<20} {'N':>4}"
-    for m in ["pearson_delta_top20", "pearson_top20", "mse", "mae", "direction_accuracy"]:
-        short = m.replace("pearson_delta_top20", "P_delta").replace(
+    for m in ["pearson_delta_all", "pearson_delta_top20", "pearson_top20", "mse", "mae", "direction_accuracy"]:
+        short = m.replace("pearson_delta_all", "P_d_all").replace(
+            "pearson_delta_top20", "P_delta").replace(
             "pearson_top20", "P_abs").replace(
             "direction_accuracy", "Dir_acc")
         header += f" {short:>10}"
     lines.append(header)
-    lines.append("-" * 90)
+    lines.append("-" * 104)
 
     for group in groups:
         n = int(metrics.get(f"_n_{group}", 0))
         row = f"{group:<20} {n:>4}"
-        for m in ["pearson_delta_top20", "pearson_top20", "mse", "mae", "direction_accuracy"]:
+        for m in ["pearson_delta_all", "pearson_delta_top20", "pearson_top20", "mse", "mae", "direction_accuracy"]:
             val = metrics.get(f"{group}/{m}", float("nan"))
             row += f" {val:>10.4f}"
         lines.append(row)
@@ -268,12 +282,12 @@ def format_subgroup_table(metrics: Dict[str, float]) -> str:
     # Overall
     n_total = sum(int(metrics.get(f"_n_{g}", 0)) for g in groups)
     row = f"{'OVERALL':<20} {n_total:>4}"
-    for m in ["pearson_delta_top20", "pearson_top20", "mse", "mae", "direction_accuracy"]:
+    for m in ["pearson_delta_all", "pearson_delta_top20", "pearson_top20", "mse", "mae", "direction_accuracy"]:
         val = metrics.get(m, float("nan"))
         row += f" {val:>10.4f}"
-    lines.append("-" * 90)
+    lines.append("-" * 104)
     lines.append(row)
-    lines.append("=" * 90)
+    lines.append("=" * 104)
 
     return "\n".join(lines)
 

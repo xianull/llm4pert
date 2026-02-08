@@ -248,22 +248,33 @@ def train(cfg):
     # ------------------------------------------------------------------
     scgpt_vocab = raw_model.cell_encoder.vocab
 
+    # PACE config
+    pace_cfg = getattr(cfg, 'pert_aware_cell_encoding', None)
+    pert_aware_enabled = pace_cfg is not None and getattr(pace_cfg, 'enabled', False)
+    force_include_pert = getattr(pace_cfg, 'force_include_pert_genes', True) if pace_cfg else True
+
     if is_main_process(rank):
         print("Creating dataloaders....")
     train_dataset = PerturbationDataset(
         pert_data, "train", gene_to_facet_idx, scgpt_vocab, gene_names,
         max_seq_len=cfg.cell_encoder.max_seq_len,
         pert_type_id=pert_type_id,
+        pert_aware=pert_aware_enabled,
+        force_include_pert_genes=force_include_pert,
     )
     val_dataset = PerturbationDataset(
         pert_data, "val", gene_to_facet_idx, scgpt_vocab, gene_names,
         max_seq_len=cfg.cell_encoder.max_seq_len,
         pert_type_id=pert_type_id,
+        pert_aware=pert_aware_enabled,
+        force_include_pert_genes=force_include_pert,
     )
     test_dataset = PerturbationDataset(
         pert_data, "test", gene_to_facet_idx, scgpt_vocab, gene_names,
         max_seq_len=cfg.cell_encoder.max_seq_len,
         pert_type_id=pert_type_id,
+        pert_aware=pert_aware_enabled,
+        force_include_pert_genes=force_include_pert,
     )
 
     # Use DistributedSampler for training data in DDP
@@ -354,6 +365,7 @@ def train(cfg):
             de_idx = batch["de_idx"].to(device)
             de_idx_len = batch["de_idx_len"].to(device)
             pert_type_ids = batch["pert_type_ids"].to(device)
+            pert_flags = batch["pert_flags"].to(device) if "pert_flags" in batch else None
 
             # Forward
             output = model(
@@ -363,6 +375,7 @@ def train(cfg):
                 pert_gene_indices=pert_gene_indices,
                 ctrl_expression=ctrl_expression,
                 pert_type_ids=pert_type_ids,
+                pert_flags=pert_flags,
             )
 
             # Loss
@@ -436,6 +449,7 @@ def train(cfg):
                     f"Val metrics: mse={val_metrics['mse']:.4f}, "
                     f"pearson_top20={val_metrics['pearson_top20']:.4f}, "
                     f"pearson_delta={val_metrics['pearson_delta_top20']:.4f}, "
+                    f"pearson_delta_all={val_metrics['pearson_delta_all']:.4f}, "
                     f"dir_acc={val_metrics['direction_accuracy']:.4f}"
                 )
                 # Per-subgroup breakdown
