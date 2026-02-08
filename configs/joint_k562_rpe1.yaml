@@ -31,7 +31,7 @@ llm:
   model: "gemini-3-pro-preview"
   temperature: 0.3
   max_tokens: 8192
-  batch_size: 200
+  batch_size: 128
   retry_max: 3
   retry_delay: 2
 
@@ -142,10 +142,11 @@ training:
   save_best: true
   early_stopping_patience: 8
   loss:
-    mse_weight: 1.0
-    de_mse_weight: 2.0
-    direction_weight: 0.5
-    rank_weight: 0.5
+    mse_weight: 1.0              # autofocus replaces plain MSE when gamma>0
+    de_mse_weight: 2.0           # additional MSE on top-20 DE genes
+    direction_weight: 1.0        # GEARS-style direction loss on ALL genes
+    rank_weight: 0.0             # disabled (autofocus handles this)
+    autofocus_gamma: 1.0         # GEARS: |error|^(2+gamma), gamma=1 → cubic
   pert_gene_dropout: 0.0
   cross_validation:
     enabled: false

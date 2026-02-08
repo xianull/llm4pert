@@ -122,8 +122,9 @@ training:
   early_stopping_patience: 8
   loss:
     mse_weight: 1.0
-    de_mse_weight: 0.5
-    direction_weight: 0.1
+    de_mse_weight: 2.0
+    direction_weight: 1.0
+    autofocus_gamma: 1.0
   cross_validation:
     enabled: true
     n_folds: 5

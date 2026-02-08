@@ -68,63 +68,63 @@ def compute_loss(
     de_mse_weight: float = 0.5,
     direction_weight: float = 0.1,
     rank_weight: float = 0.0,
+    autofocus_gamma: float = 0.0,
 ) -> dict:
-    """Combined MSE + DE-focused MSE + direction loss + ranking loss.
+    """Combined loss with GEARS-style autofocus and direction components.
 
-    MSE loss:       on all genes.
-    DE MSE loss:    focused MSE on top DE genes only.
-    Direction loss:  on top DE genes, ensuring predicted direction of change
-                     (up/down relative to control) matches ground truth.
-    Rank loss:      encourages the model to rank truly changed genes higher
-                     than unchanged ones (margin ranking on deltas).
+    Autofocus loss (GEARS, Roohani et al. 2023):
+        L_af = mean(|pred - target|^(2+gamma))
+        When gamma > 0, automatically upweights DE genes (large errors)
+        and downweights non-DE genes (small errors). No DE index needed.
+
+    Direction loss (applied to ALL genes, not just top-20):
+        L_dir = mean([sign(pred_delta) - sign(true_delta)]^2)
+        Penalizes wrong direction of change relative to control.
+
+    DE-focused MSE: additional MSE on known top DE genes (optional).
     """
-    # Global MSE
-    loss_mse = nn.functional.mse_loss(pred, target)
+    B, G = pred.shape
+    device = pred.device
 
-    # Direction loss and DE-focused MSE on DE genes
-    if (de_mse_weight > 0 or direction_weight > 0 or rank_weight > 0) and de_idx_len.sum() > 0:
-        # Clamp de_idx to valid range to prevent OOB on gather
-        de_idx = de_idx.clamp(0, pred.shape[1] - 1)
-
-        # Gather DE gene predictions and targets
-        # de_idx: (B, top_de) -> use as gather indices
-        pred_de = pred.gather(1, de_idx)      # (B, top_de)
-        target_de = target.gather(1, de_idx)  # (B, top_de)
-        ctrl_de = ctrl_expression.gather(1, de_idx)
-
-        # Mask out padded DE indices
-        mask = torch.arange(de_idx.shape[1], device=de_idx.device).unsqueeze(0)
-        mask = mask < de_idx_len.unsqueeze(1)  # (B, top_de) bool
-
-        # DE-focused MSE (masked)
-        if de_mse_weight > 0:
-            de_mse_raw = nn.functional.mse_loss(pred_de, target_de, reduction="none")
-            loss_de_mse = (de_mse_raw * mask.float()).sum() / mask.float().sum().clamp(min=1)
-        else:
-            loss_de_mse = torch.tensor(0.0, device=pred.device)
-
-        # Direction loss
-        if direction_weight > 0:
-            pred_delta = pred_de - ctrl_de
-            target_delta = target_de - ctrl_de
-            target_dir = (target_delta > 0).float()
-
-            loss_dir = nn.functional.binary_cross_entropy_with_logits(
-                pred_delta, target_dir, reduction="none"
-            )
-            loss_dir = (loss_dir * mask.float()).sum() / mask.float().sum().clamp(min=1)
-        else:
-            loss_dir = torch.tensor(0.0, device=pred.device)
-
-        # Ranking loss: DE genes should have larger |delta| than non-DE genes
-        if rank_weight > 0:
-            loss_rank = _compute_rank_loss(pred, target, ctrl_expression, de_idx, mask)
-        else:
-            loss_rank = torch.tensor(0.0, device=pred.device)
+    # --- Autofocus loss (GEARS-style) ---
+    if autofocus_gamma > 0:
+        # |error|^(2+gamma): automatically focuses on large-error (DE) genes
+        error = (pred - target).abs()
+        loss_mse = (error ** (2 + autofocus_gamma)).mean()
     else:
-        loss_de_mse = torch.tensor(0.0, device=pred.device)
-        loss_dir = torch.tensor(0.0, device=pred.device)
-        loss_rank = torch.tensor(0.0, device=pred.device)
+        # Standard MSE
+        loss_mse = nn.functional.mse_loss(pred, target)
+
+    # --- Direction loss on ALL genes (GEARS-style) ---
+    if direction_weight > 0:
+        pred_delta = pred - ctrl_expression
+        true_delta = target - ctrl_expression
+        # sign mismatch: [sign(pred_delta) - sign(true_delta)]^2
+        # sign values are -1, 0, or 1, so squared diff is 0 or 4
+        loss_dir = ((torch.sign(pred_delta) - torch.sign(true_delta)) ** 2).mean()
+    else:
+        loss_dir = torch.tensor(0.0, device=device)
+
+    # --- DE-focused MSE (optional, on top-20 DE genes) ---
+    if de_mse_weight > 0 and de_idx_len.sum() > 0:
+        de_idx_clamped = de_idx.clamp(0, G - 1)
+        pred_de = pred.gather(1, de_idx_clamped)
+        target_de = target.gather(1, de_idx_clamped)
+        mask = torch.arange(de_idx.shape[1], device=device).unsqueeze(0)
+        mask = (mask < de_idx_len.unsqueeze(1)).float()
+        de_mse_raw = nn.functional.mse_loss(pred_de, target_de, reduction="none")
+        loss_de_mse = (de_mse_raw * mask).sum() / mask.sum().clamp(min=1)
+    else:
+        loss_de_mse = torch.tensor(0.0, device=device)
+
+    # --- Ranking loss (optional) ---
+    if rank_weight > 0 and de_idx_len.sum() > 0:
+        de_idx_clamped = de_idx.clamp(0, G - 1)
+        mask = torch.arange(de_idx.shape[1], device=device).unsqueeze(0)
+        mask = (mask < de_idx_len.unsqueeze(1))
+        loss_rank = _compute_rank_loss(pred, target, ctrl_expression, de_idx_clamped, mask)
+    else:
+        loss_rank = torch.tensor(0.0, device=device)
 
     total = (
         mse_weight * loss_mse
@@ -685,6 +685,7 @@ def train(cfg):
                 de_mse_weight=cfg.training.loss.de_mse_weight,
                 direction_weight=cfg.training.loss.direction_weight,
                 rank_weight=float(getattr(cfg.training.loss, 'rank_weight', 0.0)),
+                autofocus_gamma=float(getattr(cfg.training.loss, 'autofocus_gamma', 0.0)),
             )
 
             # Backward
