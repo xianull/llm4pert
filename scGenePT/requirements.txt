@@ -1,0 +1,7 @@
+torch==2.1.2
+torch_geometric==2.5.3
+torchdata==0.7.1
+torchmetrics==1.4.0.post0
+packaging==24.1
+numpy==1.26.4
+ipython==8.27.0

@@ -12,14 +12,96 @@ GEARS protocol (Norman):
   - Metrics computed per-perturbation, averaged
   - Pearson on absolute expression and on delta
   - Direction accuracy on top-20 DE genes
+  - Breakdown by subgroup: unseen_single, combo_seen0/1/2
 """
 
 import numpy as np
 import torch
 from scipy.stats import pearsonr
 from collections import defaultdict
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from torch.utils.data import DataLoader
+
+
+METRIC_NAMES = [
+    "mse",
+    "mae",
+    "pearson_top20",
+    "pearson_delta_top20",
+    "direction_accuracy",
+]
+
+
+def _compute_pert_metrics(
+    mean_pred: np.ndarray,
+    mean_truth: np.ndarray,
+    mean_ctrl: np.ndarray,
+    de_idx: np.ndarray,
+    de_len: int,
+) -> Dict[str, float]:
+    """Compute all metrics for a single perturbation (already cell-averaged)."""
+    mse = float(np.mean((mean_pred - mean_truth) ** 2))
+
+    de_genes = de_idx[:de_len]
+    pred_de = mean_pred[de_genes]
+    truth_de = mean_truth[de_genes]
+    pred_delta = pred_de - mean_ctrl[de_genes]
+    true_delta = truth_de - mean_ctrl[de_genes]
+
+    mae_delta = float(np.mean(np.abs(pred_delta - true_delta)))
+
+    if len(pred_de) >= 2 and np.std(pred_de) > 0 and np.std(truth_de) > 0:
+        r, _ = pearsonr(pred_de, truth_de)
+    else:
+        r = 0.0
+
+    if len(pred_delta) >= 2 and np.std(pred_delta) > 0 and np.std(true_delta) > 0:
+        r_delta, _ = pearsonr(pred_delta, true_delta)
+    else:
+        r_delta = 0.0
+
+    dir_match = np.sign(pred_delta) == np.sign(true_delta)
+    dir_acc = float(np.mean(dir_match))
+
+    return {
+        "mse": mse,
+        "mae": mae_delta,
+        "pearson_top20": r,
+        "pearson_delta_top20": r_delta,
+        "direction_accuracy": dir_acc,
+    }
+
+
+def _classify_perturbation(
+    pert_name: str,
+    subgroup: Optional[Dict[str, str]] = None,
+    train_pert_genes: Optional[set] = None,
+) -> str:
+    """Classify a perturbation into a subgroup.
+
+    Uses GEARS subgroup dict if available, otherwise infers from name
+    and training gene set.
+
+    Categories:
+      - unseen_single:  single gene, not seen in training
+      - seen_single:    single gene, seen in training combos
+      - combo_seen0:    two genes, neither seen
+      - combo_seen1:    two genes, one seen
+      - combo_seen2:    two genes, both seen
+    """
+    if subgroup is not None and pert_name in subgroup:
+        return subgroup[pert_name]
+
+    parts = [g for g in pert_name.split("+") if g != "ctrl"]
+
+    if len(parts) <= 1:
+        return "unseen_single"
+
+    if train_pert_genes is not None:
+        seen_count = sum(1 for g in parts if g in train_pert_genes)
+        return f"combo_seen{seen_count}"
+
+    return "combo"
 
 
 def evaluate_model(
@@ -28,21 +110,24 @@ def evaluate_model(
     device: torch.device,
     cfg,
     collate_fn,
+    subgroup: Optional[Dict[str, str]] = None,
+    train_pert_genes: Optional[set] = None,
 ) -> Dict[str, float]:
     """Evaluate DyGenePT on a dataset split.
 
-    Metrics:
-      1. mse:                 MSE across all genes, averaged per perturbation
-      2. mae:                 MAE on delta for top-20 DE genes (LangPert metric)
-      3. pearson_top20:       Pearson r on top-20 DE genes (absolute expression)
-      4. pearson_delta_top20: Pearson r on delta (pred−ctrl vs true−ctrl) for top-20 DE
-      5. direction_accuracy:  Fraction of top-20 DE genes where predicted direction
-                              of change matches true direction
-
-    All metrics are computed per-perturbation, then averaged.
+    Args:
+        model:            Trained model.
+        dataset:          PerturbationDataset for evaluation split.
+        device:           Torch device.
+        cfg:              Config.
+        collate_fn:       Batch collation function.
+        subgroup:         Optional dict mapping pert_name -> subgroup string
+                          (from GEARS pert_data.subgroup).
+        train_pert_genes: Optional set of gene symbols seen in training perts,
+                          used for combo_seen classification when subgroup is absent.
 
     Returns:
-        Dict with metric names and their mean values.
+        Dict with overall metrics and per-subgroup breakdown.
     """
     model.eval()
 
@@ -64,7 +149,6 @@ def evaluate_model(
 
     with torch.no_grad():
         for batch in loader:
-            # Move tensors to device
             gene_ids = batch["gene_ids"].to(device)
             values = batch["values"].to(device)
             padding_mask = batch["padding_mask"].to(device)
@@ -96,91 +180,106 @@ def evaluate_model(
                     results_per_pert[pname]["de_idx"] = de_idx[i]
                     results_per_pert[pname]["de_idx_len"] = int(de_idx_len[i])
 
-    # Compute per-perturbation metrics
-    metrics = {
-        "mse": [],
-        "mae": [],
-        "pearson_top20": [],
-        "pearson_delta_top20": [],
-        "direction_accuracy": [],
-    }
+    # Compute per-perturbation metrics and group by subgroup
+    all_metrics: Dict[str, List[Dict[str, float]]] = defaultdict(list)
 
     for pert_name, data in results_per_pert.items():
-        preds = np.stack(data["preds"])
-        truths = np.stack(data["truths"])
-        ctrls = np.stack(data["ctrls"])
         de_idx = data["de_idx"]
         de_len = data["de_idx_len"]
-
         if de_len == 0:
             continue
 
-        # Average across cells sharing the same perturbation
-        mean_pred = np.mean(preds, axis=0)
-        mean_truth = np.mean(truths, axis=0)
-        mean_ctrl = np.mean(ctrls, axis=0)
+        mean_pred = np.mean(np.stack(data["preds"]), axis=0)
+        mean_truth = np.mean(np.stack(data["truths"]), axis=0)
+        mean_ctrl = np.mean(np.stack(data["ctrls"]), axis=0)
 
-        # MSE (all genes)
-        mse = float(np.mean((mean_pred - mean_truth) ** 2))
-        metrics["mse"].append(mse)
+        pert_metrics = _compute_pert_metrics(
+            mean_pred, mean_truth, mean_ctrl, de_idx, de_len
+        )
 
-        # Top DE genes
-        de_genes = de_idx[:de_len]
+        group = _classify_perturbation(pert_name, subgroup, train_pert_genes)
+        all_metrics[group].append(pert_metrics)
+        all_metrics["_all"].append(pert_metrics)
 
-        # Delta vectors (for LangPert-compatible metrics)
-        pred_de = mean_pred[de_genes]
-        truth_de = mean_truth[de_genes]
-        pred_delta = pred_de - mean_ctrl[de_genes]
-        true_delta = truth_de - mean_ctrl[de_genes]
-
-        # MAE on delta (LangPert metric)
-        mae_delta = float(np.mean(np.abs(pred_delta - true_delta)))
-        metrics["mae"].append(mae_delta)
-
-        # Pearson on absolute expression (top DE)
-        if len(pred_de) >= 2 and np.std(pred_de) > 0 and np.std(truth_de) > 0:
-            r, _ = pearsonr(pred_de, truth_de)
-            metrics["pearson_top20"].append(r)
-        else:
-            metrics["pearson_top20"].append(0.0)
-
-        # Pearson on delta (pred-ctrl vs truth-ctrl)
-        if len(pred_delta) >= 2 and np.std(pred_delta) > 0 and np.std(true_delta) > 0:
-            r_delta, _ = pearsonr(pred_delta, true_delta)
-            metrics["pearson_delta_top20"].append(r_delta)
-        else:
-            metrics["pearson_delta_top20"].append(0.0)
-
-        # Direction accuracy
-        dir_match = np.sign(pred_delta) == np.sign(true_delta)
-        metrics["direction_accuracy"].append(float(np.mean(dir_match)))
-
-    # Average across perturbations
+    # Aggregate: mean per subgroup
     result = {}
-    for k, v in metrics.items():
-        result[k] = float(np.mean(v)) if v else 0.0
+
+    # Overall metrics
+    for metric in METRIC_NAMES:
+        vals = [m[metric] for m in all_metrics["_all"]]
+        result[metric] = float(np.mean(vals)) if vals else 0.0
+
+    # Per-subgroup metrics
+    for group in sorted(all_metrics.keys()):
+        if group == "_all":
+            continue
+        n = len(all_metrics[group])
+        result[f"_n_{group}"] = n
+        for metric in METRIC_NAMES:
+            vals = [m[metric] for m in all_metrics[group]]
+            result[f"{group}/{metric}"] = float(np.mean(vals)) if vals else 0.0
 
     model.train()
     return result
+
+
+def format_subgroup_table(metrics: Dict[str, float]) -> str:
+    """Format per-subgroup evaluation results as a readable table.
+
+    Args:
+        metrics: Dict from evaluate_model (contains group/metric keys).
+
+    Returns:
+        Formatted string table.
+    """
+    # Discover subgroups
+    groups = sorted(set(
+        k.rsplit("/", 1)[0] for k in metrics if "/" in k and not k.startswith("_")
+    ))
+
+    if not groups:
+        return ""
+
+    lines = []
+    lines.append("=" * 90)
+    lines.append("Per-Subgroup Evaluation Breakdown")
+    lines.append("=" * 90)
+
+    header = f"{'Subgroup':<20} {'N':>4}"
+    for m in ["pearson_delta_top20", "pearson_top20", "mse", "mae", "direction_accuracy"]:
+        short = m.replace("pearson_delta_top20", "P_delta").replace(
+            "pearson_top20", "P_abs").replace(
+            "direction_accuracy", "Dir_acc")
+        header += f" {short:>10}"
+    lines.append(header)
+    lines.append("-" * 90)
+
+    for group in groups:
+        n = int(metrics.get(f"_n_{group}", 0))
+        row = f"{group:<20} {n:>4}"
+        for m in ["pearson_delta_top20", "pearson_top20", "mse", "mae", "direction_accuracy"]:
+            val = metrics.get(f"{group}/{m}", float("nan"))
+            row += f" {val:>10.4f}"
+        lines.append(row)
+
+    # Overall
+    n_total = sum(int(metrics.get(f"_n_{g}", 0)) for g in groups)
+    row = f"{'OVERALL':<20} {n_total:>4}"
+    for m in ["pearson_delta_top20", "pearson_top20", "mse", "mae", "direction_accuracy"]:
+        val = metrics.get(m, float("nan"))
+        row += f" {val:>10.4f}"
+    lines.append("-" * 90)
+    lines.append(row)
+    lines.append("=" * 90)
+
+    return "\n".join(lines)
 
 
 def format_comparison_table(
     dygenept_metrics: Dict[str, float],
     dataset_name: str,
 ) -> str:
-    """Format metrics as a comparison table against LangPert baselines.
-
-    LangPert reported results (from paper Table 1, Simulation split):
-      K562:  Corr=0.731, MAE=0.224, MSE=0.097
-      RPE1:  Corr=0.772, MAE=0.318, MSE=0.187
-
-    Args:
-        dygenept_metrics: Dict of DyGenePT evaluation metrics.
-        dataset_name: One of 'replogle_k562_essential' or 'replogle_rpe1_essential'.
-
-    Returns:
-        Formatted string table for logging.
-    """
+    """Format metrics as a comparison table against LangPert baselines."""
     langpert_baselines = {
         "replogle_k562_essential": {"pearson_delta_top20": 0.731, "mae": 0.224, "mse_de": 0.097},
         "replogle_rpe1_essential": {"pearson_delta_top20": 0.772, "mae": 0.318, "mse_de": 0.187},

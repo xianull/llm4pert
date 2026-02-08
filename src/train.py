@@ -26,7 +26,7 @@ from src.utils import set_seed, get_device, setup_logging
 from src.model.dygenept import DyGenePT
 from src.data.dataset import PerturbationDataset
 from src.data.collator import collate_perturbation_batch
-from src.evaluate import evaluate_model, format_comparison_table
+from src.evaluate import evaluate_model, format_comparison_table, format_subgroup_table
 
 
 # =====================================================================
@@ -201,6 +201,16 @@ def train(cfg):
     else:
         pert_data.load(data_name=data_name)
     pert_data.prepare_split(split=split_mode, seed=cfg.training.seed)
+
+    # Extract subgroup info for per-subgroup evaluation (Norman: combo_seen0/1/2, unseen_single)
+    pert_subgroup = getattr(pert_data, "subgroup", None)
+    # Collect training perturbation genes for fallback classification
+    train_pert_genes = set()
+    if hasattr(pert_data, "set2conditions") and "train" in pert_data.set2conditions:
+        for pname in pert_data.set2conditions["train"]:
+            for g in pname.split("+"):
+                if g != "ctrl":
+                    train_pert_genes.add(g)
 
     # Gene names list
     if "gene_name" in pert_data.adata.var.columns:
@@ -419,7 +429,8 @@ def train(cfg):
             if is_main_process(rank):
                 logger.info("Evaluating on validation set...")
                 val_metrics = evaluate_model(
-                    raw_model, val_dataset, device, cfg, collate_perturbation_batch
+                    raw_model, val_dataset, device, cfg, collate_perturbation_batch,
+                    subgroup=pert_subgroup, train_pert_genes=train_pert_genes,
                 )
                 logger.info(
                     f"Val metrics: mse={val_metrics['mse']:.4f}, "
@@ -477,13 +488,20 @@ def train(cfg):
         )
 
         test_metrics = evaluate_model(
-            raw_model, test_dataset, device, cfg, collate_perturbation_batch
+            raw_model, test_dataset, device, cfg, collate_perturbation_batch,
+            subgroup=pert_subgroup, train_pert_genes=train_pert_genes,
         )
         logger.info("=" * 60)
         logger.info("TEST RESULTS:")
         for k, v in test_metrics.items():
-            logger.info(f"  {k}: {v:.4f}")
+            if not k.startswith("_"):
+                logger.info(f"  {k}: {v:.4f}")
         logger.info("=" * 60)
+
+        # Print per-subgroup breakdown table
+        subgroup_table = format_subgroup_table(test_metrics)
+        if subgroup_table:
+            logger.info("\n" + subgroup_table)
 
         # Print LangPert comparison table for Replogle datasets
         if dataset_name in ("replogle_k562_essential", "replogle_rpe1_essential"):
