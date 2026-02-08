@@ -50,12 +50,21 @@ facets:
 # Embedding
 # ========================
 embedding:
-  backend: "local"
-  model_name: "FremyCompany/BioLORD-2023-M"
+  backend: "api"
+  model_name: "FremyCompany/BioLORD-2023-M"   # fallback for local
   pooling: "mean"
   max_length: 256
+  api:
+    base_url: "https://api.siliconflow.cn/v1"
+    api_key: "${oc.env:EMBED_API_KEY,\"\"}"
+    model: "Qwen/Qwen3-Embedding-8B"
+    dimensions: 4096                            # rich semantic space
+    batch_limit: 32
+    concurrency: 8
+    retry_max: 3
+    retry_delay: 2
   batch_size: 64
-  embed_dim: 768
+  embed_dim: 4096                               # match Qwen output
 
 # ========================
 # Cell Encoder

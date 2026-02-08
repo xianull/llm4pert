@@ -127,14 +127,16 @@ class FacetCrossAttention(nn.Module):
 class SemanticCrossAttention(nn.Module):
     """V2: Context-aware perturbed gene facets attend over all genome genes.
 
-    Q = W_Q(context_Q)           ->  (B, P, K, D)   context-aware pert facets
-    K = W_K(genome_facets)       ->  (G, K, D)       all genes' static facets
-    sim = einsum(Q, K)           ->  (B, P, K, G)    per-facet similarity
-    impact = combine(sim, w)     ->  (B, P, G)       weighted facet aggregation
-    impact = topk_sparse(impact) ->  (B, P, G)       sparse impact scores
+    Frozen semantic embeddings are first transformed through a trainable
+    adapter (semantic → perturbation space), then Q·K^T is computed in
+    the adapted space.
 
-    Unlike V1 which attends over 8 facets of the perturbed gene,
-    V2 attends over the entire genome to compute a direct impact map.
+    Pipeline:
+      adapter(frozen_facets)     ->  adapted facets (nonlinear transform)
+      Q = W_Q(FiLM(adapted[pert]))  ->  (B, P, K, D)
+      K = W_K(adapted[genome])      ->  (G, K, D)
+      sim = einsum(Q, K)            ->  (B, P, K, G)
+      impact = combine(sim, w)      ->  (B, P, G)
     """
 
     def __init__(
@@ -143,11 +145,21 @@ class SemanticCrossAttention(nn.Module):
         num_facets: int = 8,
         dropout: float = 0.1,
         topk: int = 200,
+        adapter_bottleneck: int = 256,
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_facets = num_facets
         self.topk = topk
+
+        # Shared adapter: semantic space → perturbation space (nonlinear)
+        # Applied to BOTH Q-side and K-side genome facets
+        self.facet_adapter = nn.Sequential(
+            nn.Linear(embed_dim, adapter_bottleneck),
+            nn.GELU(),
+            nn.Linear(adapter_bottleneck, embed_dim),
+            nn.LayerNorm(embed_dim),
+        )
 
         self.W_Q = nn.Linear(embed_dim, embed_dim)
         self.W_K = nn.Linear(embed_dim, embed_dim)
@@ -181,9 +193,10 @@ class SemanticCrossAttention(nn.Module):
             impact_scores:  (B, P, G) per-gene impact from each perturbation.
             facet_weights:  (K,) normalized facet channel weights.
         """
-        # Project Q and K
-        Q = self.W_Q(context_Q)      # (B, P, K, D)
-        K = self.W_K(genome_facets)   # (G, K, D)
+        # Adapt frozen embeddings: semantic → perturbation space
+        # context_Q already went through adapter in gene_encoder, apply to Q here too
+        Q = self.W_Q(self.facet_adapter(context_Q))      # (B, P, K, D)
+        K = self.W_K(self.facet_adapter(genome_facets))   # (G, K, D)
 
         # Per-facet channel similarity via einsum
         # (B, P, K, D) × (G, K, D) -> (B, P, K, G)
