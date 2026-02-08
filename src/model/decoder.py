@@ -60,14 +60,6 @@ class PerturbationDecoder(nn.Module):
             nn.Linear(1024, num_genes),
         )
 
-        # --- Interaction MLP for combinatorial perturbations (P=2) ---
-        self.interaction_mlp = nn.Sequential(
-            nn.Linear(self.latent_dim * 2, self.latent_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(self.latent_dim, self.latent_dim),
-        )
-
         # --- ctrl_expression encoder for gate conditioning ---
         self.ctrl_encoder = nn.Sequential(
             nn.Linear(num_genes, self.latent_dim),
@@ -101,16 +93,10 @@ class PerturbationDecoder(nn.Module):
         #    (B, P, D) -> (B, P, latent_dim)
         shifts = self.shift_encoder(dynamic_emb)
 
-        # 2. Combine shifts across perturbations
+        # 2. Sum shifts across perturbations
+        #    Cross-perturbation interaction is handled upstream (Module 3.5)
         #    (B, P, latent_dim) -> (B, latent_dim)
-        P = shifts.size(1)
-        if P > 1:
-            # Interaction term for combinatorial perturbations (pairwise)
-            pair_input = torch.cat([shifts[:, 0], shifts[:, 1]], dim=-1)
-            interaction = self.interaction_mlp(pair_input)
-            combined_shift = shifts.sum(dim=1) + interaction
-        else:
-            combined_shift = shifts.sum(dim=1)
+        combined_shift = shifts.sum(dim=1)
 
         # 3. Project cell query to latent space
         #    (B, D) -> (B, latent_dim)
