@@ -262,11 +262,6 @@ class DyGenePT(nn.Module):
         # Module 2: MLP cell encoder (replaces scGPT)
         self.cell_encoder = MLPCellEncoder(num_genes, target_dim, hidden_dims=cell_hidden)
 
-        # Module 2.5: Contextualizer (FiLM)
-        self.contextualizer = Contextualizer(
-            target_dim, num_facets=num_facets, dropout=ctx_dropout, hidden_dims=ctx_hidden,
-        )
-
         # Build aligned genome facets: (num_genes, K, D) — frozen, no adapter
         assert gene_names is not None, (
             "gene_names is required for v2 architecture"
@@ -276,6 +271,11 @@ class DyGenePT(nn.Module):
         # Use actual K from loaded tensor (may differ from config if
         # precompute was run with a different facet count)
         actual_k = self.gene_encoder.num_facets
+
+        # Module 2.5: Contextualizer (per-facet FiLM)
+        self.contextualizer = Contextualizer(
+            target_dim, num_facets=actual_k, dropout=ctx_dropout, hidden_dims=ctx_hidden,
+        )
 
         # Module 3: Semantic cross-attention (pert → genome)
         topk = getattr(cfg.cross_attention, 'topk', 200)
