@@ -10,6 +10,8 @@ Usage: set cfg.cell_encoder.model_name to "mlp" or "constant".
 import torch
 import torch.nn as nn
 
+from .mlp_utils import build_mlp
+
 
 class MLPCellEncoder(nn.Module):
     """Encodes cell state from raw control expression via MLP.
@@ -18,21 +20,25 @@ class MLPCellEncoder(nn.Module):
     simple learned projection of the expression vector provides.
     """
 
-    def __init__(self, num_genes: int, target_dim: int = 768):
+    def __init__(self, num_genes: int, target_dim: int = 768,
+                 hidden_dims: list = None):
         super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(num_genes, 1024),
-            nn.GELU(),
-            nn.LayerNorm(1024),
-            nn.Linear(1024, target_dim),
-            nn.GELU(),
-            nn.LayerNorm(target_dim),
+        if hidden_dims is None:
+            hidden_dims = [1024]
+
+        self.encoder = build_mlp(
+            in_dim=num_genes,
+            out_dim=target_dim,
+            hidden_dims=hidden_dims,
+            activation="gelu",
+            norm="layernorm",
+            final_activation=True,
         )
 
         trainable = sum(p.numel() for p in self.parameters())
         print(
             f"[MLPCellEncoder] num_genes={num_genes}, target_dim={target_dim}, "
-            f"trainable={trainable:,}"
+            f"hidden_dims={hidden_dims}, trainable={trainable:,}"
         )
 
     def forward(self, ctrl_expression: torch.Tensor, **kwargs) -> torch.Tensor:

@@ -12,26 +12,25 @@ from src.precompute.llm_utils import extract_json_from_llm_response
 
 # Facet names (must match config)
 DEFAULT_FACET_NAMES = [
-    "Transcriptional Regulation",
-    "Cell Cycle & Proliferation",
-    "Cell Death & Survival",
-    "Metabolic Processes",
-    "Immune Response",
-    "Signal Transduction",
-    "Cell Motility & Adhesion",
-    "Transport & Localization",
+    "Molecular Function & Protein Interactions",
+    "Biological Pathways & Signaling",
+    "Gene Regulation & Transcriptional Control",
+    "Loss-of-Function Impact & Cellular Fitness",
 ]
 
-SYSTEM_PROMPT_TEMPLATE = """You are a molecular biology expert. Given a gene description, \
-decompose its functions into exactly {K} independent biological facets. \
-For each facet, write a concise paragraph (2-4 sentences) describing the gene's \
-role in that specific biological process. If the gene has NO known function \
-in a facet, output exactly the string "<NULL>" for that facet.
+SYSTEM_PROMPT_TEMPLATE = """You are a molecular biology expert specializing in CRISPRi \
+perturbation experiments. Given a gene description, decompose its biological role into \
+exactly {K} facets focused on predicting the transcriptomic impact of gene knockdown. \
+For each facet, write a concise paragraph (2-4 sentences) describing the gene's role. \
+If the gene has NO known function in a facet, output exactly the string "<NULL>".
 
 The {K} facets are:
 {facet_list}
 
 IMPORTANT:
+- Focus on information relevant to predicting what happens when this gene is knocked down.
+- For protein interactions, prioritize experimentally validated physical interactions and protein complex membership.
+- For loss-of-function impact, include essentiality and cell-type-specific effects if known.
 - Output ONLY a valid JSON object with the facet names as keys and description strings (or "<NULL>") as values.
 - Do NOT fabricate functions. If the gene description does not mention a relevant role, use "<NULL>".
 - Keep each facet description focused and factual (2-4 sentences max)."""

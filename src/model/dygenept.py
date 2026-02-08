@@ -23,6 +23,7 @@ from .cell_encoder import CellEncoder
 from .ablation_cell_encoder import MLPCellEncoder, ConstantCellEncoder
 from .cross_attention import FacetCrossAttention, SemanticCrossAttention
 from .decoder import PerturbationDecoder, PerturbationDecoderV2
+from .mlp_utils import build_mlp
 
 
 # =====================================================================
@@ -80,24 +81,33 @@ class Contextualizer(nn.Module):
     produce cell-type-specific impact maps.
     """
 
-    def __init__(self, embed_dim: int, dropout: float = 0.1):
+    def __init__(self, embed_dim: int, dropout: float = 0.1,
+                 hidden_dims: list = None):
         super().__init__()
         self.embed_dim = embed_dim
-        self.film_net = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
-            nn.GELU(),
-            nn.Linear(embed_dim, embed_dim * 2),  # gamma + beta
+
+        if hidden_dims is None:
+            hidden_dims = [embed_dim]
+
+        # FiLM net: cell_emb -> hidden layers -> gamma + beta (2 * embed_dim)
+        self.film_net = build_mlp(
+            in_dim=embed_dim,
+            out_dim=embed_dim * 2,  # gamma + beta
+            hidden_dims=hidden_dims,
+            activation="gelu",
+            final_activation=False,
         )
         self.layer_norm = nn.LayerNorm(embed_dim)
         self.dropout = nn.Dropout(dropout)
 
         # Initialize gamma close to 1, beta close to 0
+        # build_mlp with final_activation=False guarantees last element is nn.Linear
         nn.init.zeros_(self.film_net[-1].weight)
         nn.init.zeros_(self.film_net[-1].bias)
         # Set gamma bias to 1 (first half of output)
         self.film_net[-1].bias.data[:embed_dim] = 1.0
 
-        print(f"[Contextualizer] embed_dim={embed_dim}")
+        print(f"[Contextualizer] embed_dim={embed_dim}, hidden_dims={hidden_dims}")
 
     def forward(
         self,
@@ -137,11 +147,16 @@ class DyGenePT(nn.Module):
         embed_dim = cfg.embedding.embed_dim
 
         # Module 1: Gene facet embeddings (shared, frozen)
+        ge_cfg = getattr(cfg, 'gene_encoder', None)
+        adapter_hidden_raw = getattr(ge_cfg, 'adapter_hidden_dims', None) if ge_cfg else None
+        adapter_hidden = list(adapter_hidden_raw) if adapter_hidden_raw is not None else None
+
         self.gene_encoder = GeneEncoder(
             facet_embeddings_path=cfg.paths.facet_embeddings,
             num_facets=num_facets,
             embed_dim=embed_dim,
             freeze=True,
+            adapter_hidden_dims=adapter_hidden,
         )
 
         if self.arch_version == 'v2':
@@ -161,7 +176,8 @@ class DyGenePT(nn.Module):
         cell_encoder_type = getattr(cfg.cell_encoder, 'model_name', 'scGPT')
         self._cell_encoder_type = cell_encoder_type
         if cell_encoder_type == 'mlp':
-            self.cell_encoder = MLPCellEncoder(num_genes, target_dim)
+            cell_hidden = list(getattr(cfg.cell_encoder, 'hidden_dims', None) or [1024])
+            self.cell_encoder = MLPCellEncoder(num_genes, target_dim, hidden_dims=cell_hidden)
         elif cell_encoder_type == 'constant':
             self.cell_encoder = ConstantCellEncoder(target_dim)
         else:
@@ -206,13 +222,24 @@ class DyGenePT(nn.Module):
         """Initialize v2 architecture (context-aware semantic cross-attention)."""
         self._cell_encoder_type = 'mlp'
 
-        # Module 2: MLP cell encoder (replaces scGPT)
-        self.cell_encoder = MLPCellEncoder(num_genes, target_dim)
+        # --- Read configurable hidden dims with backward-compatible defaults ---
+        cell_hidden = list(getattr(cfg.cell_encoder, 'hidden_dims', None) or [1024])
 
-        # Module 2.5: Contextualizer (FiLM)
         ctx_cfg = getattr(cfg, 'contextualizer', None)
         ctx_dropout = ctx_cfg.dropout if ctx_cfg else cfg.cross_attention.dropout
-        self.contextualizer = Contextualizer(target_dim, dropout=ctx_dropout)
+        ctx_hidden_raw = getattr(ctx_cfg, 'hidden_dims', None) if ctx_cfg else None
+        ctx_hidden = list(ctx_hidden_raw) if ctx_hidden_raw is not None else None
+
+        impact_hidden = list(getattr(cfg.decoder, 'v2_impact_hidden_dims', None) or [1024, 1024])
+        gate_hidden = list(getattr(cfg.decoder, 'v2_gate_hidden_dims', None) or [1024])
+
+        # Module 2: MLP cell encoder (replaces scGPT)
+        self.cell_encoder = MLPCellEncoder(num_genes, target_dim, hidden_dims=cell_hidden)
+
+        # Module 2.5: Contextualizer (FiLM)
+        self.contextualizer = Contextualizer(
+            target_dim, dropout=ctx_dropout, hidden_dims=ctx_hidden,
+        )
 
         # Build aligned genome facets: (num_genes, K, D) — frozen, no adapter
         assert gene_names is not None, (
@@ -236,6 +263,8 @@ class DyGenePT(nn.Module):
             embed_dim=target_dim,
             num_genes=num_genes,
             dropout=getattr(cfg.decoder, 'dropout', 0.1),
+            impact_hidden_dims=impact_hidden,
+            gate_hidden_dims=gate_hidden,
         )
 
         # No perturbation type embedding in v2 (CRISPRi only)

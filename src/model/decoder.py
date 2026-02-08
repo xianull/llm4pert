@@ -9,6 +9,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .mlp_utils import build_mlp
+
 
 class PerturbationDecoder(nn.Module):
     """MLP-based decoder using latent space arithmetic.
@@ -211,39 +213,49 @@ class PerturbationDecoderV2(nn.Module):
         embed_dim: int = 768,
         num_genes: int = 5000,
         dropout: float = 0.1,
+        impact_hidden_dims: list = None,
+        gate_hidden_dims: list = None,
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_genes = num_genes
 
+        if impact_hidden_dims is None:
+            impact_hidden_dims = [1024, 1024]
+        if gate_hidden_dims is None:
+            gate_hidden_dims = [1024]
+
         # Transform semantic impact → expression delta
         # impact_map (B, G) + cell_emb features → per-gene delta
-        self.impact_transform = nn.Sequential(
-            nn.Linear(num_genes + embed_dim, 1024),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(1024, 1024),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(1024, num_genes),
+        self.impact_transform = build_mlp(
+            in_dim=num_genes + embed_dim,
+            out_dim=num_genes,
+            hidden_dims=impact_hidden_dims,
+            activation="gelu",
+            dropout=dropout,
+            final_activation=False,
         )
 
         # Gate: ctrl expression → per-gene activation filter
-        self.gate_net = nn.Sequential(
-            nn.Linear(num_genes, 1024),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(1024, num_genes),
+        self.gate_net = build_mlp(
+            in_dim=num_genes,
+            out_dim=num_genes,
+            hidden_dims=gate_hidden_dims,
+            activation="gelu",
+            dropout=dropout,
+            final_activation=False,
         )
 
         # Small init for impact_transform output layer → initial pred ≈ ctrl
+        # build_mlp with final_activation=False guarantees last element is nn.Linear
         nn.init.zeros_(self.impact_transform[-1].weight)
         nn.init.zeros_(self.impact_transform[-1].bias)
 
         trainable = sum(p.numel() for p in self.parameters())
         print(
             f"[PerturbationDecoderV2] embed_dim={embed_dim}, "
-            f"num_genes={num_genes}, trainable={trainable:,}"
+            f"num_genes={num_genes}, impact_hidden={impact_hidden_dims}, "
+            f"gate_hidden={gate_hidden_dims}, trainable={trainable:,}"
         )
 
     def forward(

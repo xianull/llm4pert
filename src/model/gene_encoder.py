@@ -7,7 +7,9 @@ loads a confidence mask from KG-based facet imputation.
 
 import torch
 import torch.nn as nn
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
+
+from .mlp_utils import build_mlp
 
 
 class GeneEncoder(nn.Module):
@@ -26,6 +28,7 @@ class GeneEncoder(nn.Module):
         num_facets: int = 8,
         embed_dim: int = 768,
         freeze: bool = True,
+        adapter_hidden_dims: list = None,
     ):
         super().__init__()
         self.num_facets = num_facets
@@ -60,11 +63,22 @@ class GeneEncoder(nn.Module):
         )
 
         # Learnable adapter to fine-tune frozen embeddings for downstream task
-        self.adapter = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
-            nn.GELU(),
-            nn.LayerNorm(embed_dim),
-        )
+        if adapter_hidden_dims is not None and len(adapter_hidden_dims) > 0:
+            self.adapter = build_mlp(
+                in_dim=embed_dim,
+                out_dim=embed_dim,
+                hidden_dims=adapter_hidden_dims,
+                activation="gelu",
+                norm="layernorm",
+                final_activation=True,
+            )
+        else:
+            # Default: single linear layer (backward compatible)
+            self.adapter = nn.Sequential(
+                nn.Linear(embed_dim, embed_dim),
+                nn.GELU(),
+                nn.LayerNorm(embed_dim),
+            )
 
         print(
             f"[GeneEncoder] Loaded {self.facet_tensor.shape[0]} genes, "

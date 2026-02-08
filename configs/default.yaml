@@ -36,16 +36,12 @@ llm:
 # Facets Definition
 # ========================
 facets:
-  num_facets: 8
+  num_facets: 4
   names:
-    - "Transcriptional Regulation"
-    - "Cell Cycle & Proliferation"
-    - "Cell Death & Survival"
-    - "Metabolic Processes"
-    - "Immune Response"
-    - "Signal Transduction"
-    - "Cell Motility & Adhesion"
-    - "Transport & Localization"
+    - "Molecular Function & Protein Interactions"
+    - "Biological Pathways & Signaling"
+    - "Gene Regulation & Transcriptional Control"
+    - "Loss-of-Function Impact & Cellular Fitness"
 
 # ========================
 # Embedding Model (Module 1 - Text Encoding)
@@ -79,6 +75,13 @@ cell_encoder:
   embed_dim: 512
   freeze_layers: -2            # v1 only: 冻结除最后 2 层外的所有层
   max_seq_len: 3000            # v1 only: 最大基因数
+  hidden_dims: [1024]          # v2 MLP 中间层宽度, e.g. [2048, 1024] for deeper
+
+# ========================
+# Gene Encoder (Module 1 adapter)
+# ========================
+gene_encoder:
+  adapter_hidden_dims: null      # null = 单层 (embed_dim -> embed_dim); e.g. [256] = bottleneck
 
 # ========================
 # Perturbation-Aware Cell Encoding (PACE) — v1 only
@@ -94,6 +97,7 @@ pert_aware_cell_encoding:
 # ========================
 contextualizer:
   dropout: 0.1
+  hidden_dims: null              # null = [embed_dim]; e.g. [512] for narrower FiLM
 
 # ========================
 # Cross-Attention (Module 3)
@@ -126,6 +130,9 @@ decoder:
   gene_embed_lr_scale: 0.1     # gene_embed_proj 学习率 = lr * scale
   use_gene_graph: false      # GO graph (未实现，保留为扩展项)
   num_go_layers: 2
+  # v2 decoder 子网络结构
+  v2_impact_hidden_dims: [1024, 1024]  # impact_transform: (G+D) -> [...] -> G
+  v2_gate_hidden_dims: [1024]          # gate_net: G -> [...] -> G
 
 # ========================
 # Training

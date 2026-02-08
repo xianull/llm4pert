@@ -34,16 +34,12 @@ llm:
 # Facets Definition
 # ========================
 facets:
-  num_facets: 8
+  num_facets: 4
   names:
-    - "Transcriptional Regulation"
-    - "Cell Cycle & Proliferation"
-    - "Cell Death & Survival"
-    - "Metabolic Processes"
-    - "Immune Response"
-    - "Signal Transduction"
-    - "Cell Motility & Adhesion"
-    - "Transport & Localization"
+    - "Molecular Function & Protein Interactions"
+    - "Biological Pathways & Signaling"
+    - "Gene Regulation & Transcriptional Control"
+    - "Loss-of-Function Impact & Cellular Fitness"
 
 # ========================
 # Embedding Model (Module 1 - Text Encoding)
