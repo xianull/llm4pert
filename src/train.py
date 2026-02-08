@@ -301,7 +301,7 @@ def train(cfg):
     # ------------------------------------------------------------------
     # 7. Training loop
     # ------------------------------------------------------------------
-    best_val_mse = float("inf")
+    best_val_score = float("-inf")
     patience_counter = 0
     output_dir = Path(cfg.paths.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -425,14 +425,15 @@ def train(cfg):
                     import wandb
                     wandb.log({f"val/{k}": v for k, v in val_metrics.items()})
 
-                # Save best model
-                if val_metrics["mse"] < best_val_mse:
-                    best_val_mse = val_metrics["mse"]
+                # Save best model (select by pearson_delta_top20, higher is better)
+                val_score = val_metrics["pearson_delta_top20"]
+                if val_score > best_val_score:
+                    best_val_score = val_score
                     patience_counter = 0
                     torch.save(
                         raw_model.state_dict(), output_dir / "best_model.pt"
                     )
-                    logger.info(f"New best model saved (val_mse={best_val_mse:.4f})")
+                    logger.info(f"New best model saved (pearson_delta={best_val_score:.4f})")
                 else:
                     patience_counter += 1
                     logger.info(

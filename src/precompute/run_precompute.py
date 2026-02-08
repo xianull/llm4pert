@@ -29,28 +29,47 @@ from src.precompute.facet_embedder import FacetEmbedder
 def get_gene_list_from_gears(data_dir: str, dataset_name: str):
     """Load the GEARS dataset to extract the gene vocabulary.
 
-    Returns a list of gene symbol strings.
+    Returns a list of gene symbol strings and (optionally) pert_data.
+    Falls back to reading anndata directly if GEARS full loading fails.
     """
     import os
+    import scanpy as sc
     from gears import PertData
 
-    pert_data = PertData(data_dir)
-
-    # If data exists locally, pass data_path explicitly
-    # (some datasets are not in GEARS' built-in URL list)
     local_path = os.path.join(data_dir, dataset_name)
-    if os.path.exists(local_path):
-        pert_data.load(data_path=local_path)
-    else:
-        pert_data.load(data_name=dataset_name)
+    h5ad_path = os.path.join(local_path, "perturb_processed.h5ad")
 
-    # GEARS stores gene names in adata.var
+    # Fast path: read anndata directly (avoids GEARS PyG processing)
+    if os.path.exists(h5ad_path):
+        print(f"[run_precompute] Reading gene list directly from {h5ad_path}")
+        adata = sc.read_h5ad(h5ad_path)
+        if "gene_name" in adata.var.columns:
+            gene_list = list(adata.var["gene_name"])
+        else:
+            gene_list = list(adata.var_names)
+        print(f"[run_precompute] Loaded {len(gene_list)} genes from {dataset_name} dataset.")
+        return gene_list, None
+
+    # Full GEARS loading (auto-downloads if needed)
+    pert_data = PertData(data_dir)
+    try:
+        if os.path.exists(local_path):
+            pert_data.load(data_path=local_path)
+        else:
+            pert_data.load(data_name=dataset_name)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to load dataset '{dataset_name}' from {data_dir}: {e}\n"
+            f"Ensure the data is extracted at {local_path}/"
+        ) from e
+
     if "gene_name" in pert_data.adata.var.columns:
         gene_list = list(pert_data.adata.var["gene_name"])
     else:
         gene_list = list(pert_data.adata.var_names)
 
     print(f"[run_precompute] Loaded {len(gene_list)} genes from {dataset_name} dataset.")
+    return gene_list, pert_data
     return gene_list, pert_data
 
 
