@@ -70,8 +70,17 @@ embedding:
 cell_encoder:
   model_name: "scGPT"
   embed_dim: 512
-  freeze_layers: -2        # 冻结除最后 2 层外的所有层
+  freeze_layers: 0        # 冻结除最后 2 层外的所有层
   max_seq_len: 3000         # 最大基因数
+
+# ========================
+# Perturbation-Aware Cell Encoding (PACE)
+# ========================
+pert_aware_cell_encoding:
+  enabled: true
+  n_pert_categories: 3       # 0=not_perturbed, 1=perturbed, 2=padding
+  padding_idx: 2
+  force_include_pert_genes: true   # 强制将被扰动基因纳入 scGPT token 序列
 
 # ========================
 # Cross-Attention (Module 3)
@@ -155,6 +164,7 @@ evaluation:
   metrics:
     - "mse"
     - "mae"
+    - "pearson_delta_all"
     - "pearson_top20"
     - "pearson_delta_top20"
     - "direction_accuracy"
