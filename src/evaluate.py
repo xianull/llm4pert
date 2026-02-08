@@ -131,7 +131,7 @@ def evaluate_model(
     """
     model.eval()
 
-    eval_batch_size = cfg.training.batch_size * 2
+    eval_batch_size = cfg.training.batch_size * 4
 
     loader = DataLoader(
         dataset,
@@ -147,23 +147,26 @@ def evaluate_model(
         lambda: {"preds": [], "truths": [], "ctrls": [], "de_idx": None, "de_idx_len": 0}
     )
 
+    use_amp = device.type == "cuda"
+
     with torch.no_grad():
         for batch in loader:
-            gene_ids = batch["gene_ids"].to(device)
-            values = batch["values"].to(device)
-            padding_mask = batch["padding_mask"].to(device)
-            pert_gene_indices = batch["pert_gene_indices"].to(device)
-            ctrl_expression = batch["ctrl_expression"].to(device)
-            pert_type_ids = batch["pert_type_ids"].to(device) if "pert_type_ids" in batch else None
+            gene_ids = batch["gene_ids"].to(device, non_blocking=True)
+            values = batch["values"].to(device, non_blocking=True)
+            padding_mask = batch["padding_mask"].to(device, non_blocking=True)
+            pert_gene_indices = batch["pert_gene_indices"].to(device, non_blocking=True)
+            ctrl_expression = batch["ctrl_expression"].to(device, non_blocking=True)
+            pert_type_ids = batch["pert_type_ids"].to(device, non_blocking=True) if "pert_type_ids" in batch else None
 
-            output = model(
-                gene_ids=gene_ids,
-                values=values,
-                padding_mask=padding_mask,
-                pert_gene_indices=pert_gene_indices,
-                ctrl_expression=ctrl_expression,
-                pert_type_ids=pert_type_ids,
-            )
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                output = model(
+                    gene_ids=gene_ids,
+                    values=values,
+                    padding_mask=padding_mask,
+                    pert_gene_indices=pert_gene_indices,
+                    ctrl_expression=ctrl_expression,
+                    pert_type_ids=pert_type_ids,
+                )
 
             pred = output["pred_expression"].cpu().numpy()
             target = batch["target_expression"].numpy()

@@ -438,6 +438,10 @@ def train(cfg):
                     f"pearson_delta={val_metrics['pearson_delta_top20']:.4f}, "
                     f"dir_acc={val_metrics['direction_accuracy']:.4f}"
                 )
+                # Per-subgroup breakdown
+                subgroup_table = format_subgroup_table(val_metrics)
+                if subgroup_table:
+                    logger.info("\n" + subgroup_table)
 
                 if use_wandb:
                     import wandb
