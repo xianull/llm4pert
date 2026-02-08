@@ -1,0 +1,207 @@
+# DyGenePT Configuration — Joint K562 + RPE1 Training
+# Train v2 architecture on both cell lines simultaneously
+# to enable cell-type-specific FiLM conditioning.
+#
+# Usage:
+#   python -m src.train --config configs/joint_k562_rpe1.yaml architecture_version=v2
+
+# ========================
+# Paths
+# ========================
+paths:
+  gene_info: "data/Homo_sapiens_gene_info_with_go_and_pathways.tsv"
+  facet_output: "data/joint_k562_rpe1/gene_facets.jsonl"
+  facet_embeddings: "data/joint_k562_rpe1/gene_facet_embeddings.pt"
+  perturb_data_dir: "data/perturb_data"
+  scgpt_checkpoint: "checkpoints/scgpt/whole_human"
+  output_dir: "outputs/joint_k562_rpe1"
+  kg_dir: "data/kg"
+
+# ========================
+# Architecture
+# ========================
+architecture_version: "v2"
+
+# ========================
+# LLM API
+# ========================
+llm:
+  base_url: "https://yunwu.ai/v1"
+  api_key: "${oc.env:LLM_API_KEY,\"\"}"
+  model: "gemini-3-pro-preview"
+  temperature: 0.3
+  max_tokens: 8192
+  batch_size: 128
+  retry_max: 3
+  retry_delay: 2
+
+# ========================
+# Facets
+# ========================
+facets:
+  num_facets: 4
+  names:
+    - "Molecular Function & Protein Interactions"
+    - "Biological Pathways & Signaling"
+    - "Regulatory Network & Expression Dependencies"
+    - "Essentiality & Cellular Stress Response"
+
+# ========================
+# Embedding
+# ========================
+embedding:
+  backend: "local"
+  model_name: "FremyCompany/BioLORD-2023-M"
+  pooling: "mean"
+  max_length: 256
+  batch_size: 64
+  embed_dim: 768
+
+# ========================
+# Cell Encoder
+# ========================
+cell_encoder:
+  model_name: "mlp"
+  embed_dim: 512
+  freeze_layers: -2
+  max_seq_len: 3000
+  hidden_dims: [1024]
+
+# ========================
+# Gene Encoder
+# ========================
+gene_encoder:
+  adapter_hidden_dims: null
+
+# ========================
+# PACE (disabled for v2)
+# ========================
+pert_aware_cell_encoding:
+  enabled: false
+  n_pert_categories: 3
+  padding_idx: 2
+  force_include_pert_genes: true
+
+# ========================
+# Contextualizer
+# ========================
+contextualizer:
+  dropout: 0.1
+  hidden_dims: null
+
+# ========================
+# Cross-Attention
+# ========================
+cross_attention:
+  num_heads: 8
+  hidden_dim: 768
+  dropout: 0.1
+  topk: 0
+
+# ========================
+# Perturbation Type (disabled — CRISPRi only)
+# ========================
+perturbation_type:
+  enabled: false
+  num_types: 3
+  type_names:
+    - "activation"
+    - "repression"
+    - "knockout"
+
+# ========================
+# Decoder
+# ========================
+decoder:
+  hidden_dims: [512, 256]
+  dropout: 0.1
+  gene_embed_aware: true
+  gene_embed_dim: 512
+  gene_embed_lr_scale: 0.1
+  use_gene_graph: false
+  num_go_layers: 2
+
+# ========================
+# Training — Joint K562 + RPE1
+# ========================
+training:
+  # Multi-dataset: list of dataset names to train jointly
+  datasets:
+    - replogle_k562_essential
+    - replogle_rpe1_essential
+  dataset: "replogle_k562_essential"  # fallback for single-dataset mode
+  seed: 42
+  epochs: 30
+  batch_size: 128
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  scheduler: "cosine"
+  warmup_steps: 500
+  gradient_clip: 1.0
+  eval_every: 1
+  save_best: true
+  early_stopping_patience: 8
+  loss:
+    mse_weight: 1.0
+    de_mse_weight: 2.0
+    direction_weight: 0.5
+    rank_weight: 0.5
+  pert_gene_dropout: 0.0
+  cross_validation:
+    enabled: false
+    n_folds: 5
+    split_mode: "simulation"
+
+# ========================
+# Dataset-specific settings
+# ========================
+dataset_configs:
+  replogle_k562_essential:
+    data_name: "replogle_k562_essential"
+    split_mode: "simulation"
+    single_gene_only: true
+    pert_type: 1
+  replogle_rpe1_essential:
+    data_name: "replogle_rpe1_essential"
+    split_mode: "simulation"
+    single_gene_only: true
+    pert_type: 1
+
+# ========================
+# Evaluation
+# ========================
+evaluation:
+  top_de_genes: 20
+  metrics:
+    - "mse"
+    - "mae"
+    - "pearson_delta_all"
+    - "pearson_top20"
+    - "pearson_delta_top20"
+    - "direction_accuracy"
+
+# ========================
+# KG Enrichment
+# ========================
+kg_enrichment:
+  enabled: true
+  string_evidence_filter:
+    - "experiments"
+    - "database"
+  max_neighbors: 5
+
+# ========================
+# KG Facet Imputation
+# ========================
+imputation:
+  enabled: true
+  max_neighbors: 20
+  min_informed_neighbors: 2
+  confidence_cap: 0.8
+  num_rounds: 3
+  evidence_weights:
+    experiments: 1.0
+    database: 0.8
+    experiments_transferred: 0.5
+    textmining: 0.3
+    textmining_transferred: 0.2

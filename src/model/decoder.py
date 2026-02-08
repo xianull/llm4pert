@@ -196,18 +196,20 @@ class PerturbationDecoder(nn.Module):
 
 
 class PerturbationDecoderV2(nn.Module):
-    """V2 decoder: impact map → residual scaling + MLP correction → gated prediction.
-
-    The SemanticCrossAttention produces per-gene semantic impact scores.
-    The decoder converts these to expression deltas via:
-      1. A direct residual path: impact_map * learned_scale (strong gradient to cross-attn)
-      2. An MLP correction conditioned on cell state (nonlinear refinement)
-      3. A gate conditioned on ctrl_expression (context filter)
+    """V2 decoder: impact map → perturbation-aware correction → gated prediction.
 
     Architecture:
-      raw_delta = impact_map * scale + MLP(cell_emb)  -> (B, G)
-      gate = sigmoid(gate_net(ctrl_expression))         -> (B, G)
-      pred = ctrl + gate * raw_delta
+      1. Residual: impact_map * per-gene scale (direct gradient to cross-attn)
+      2. Perturbation-aware correction: MLP(impact_summary + cell_emb) → (B, G)
+         - impact_summary compresses impact_map to a compact perturbation fingerprint
+         - This lets the correction know WHICH gene was perturbed
+      3. Gate: sigmoid(MLP(ctrl_expression)) → (B, G) context filter
+
+    Formula:
+      impact_summary = Linear(impact_map)               -> (B, summary_dim)
+      correction = MLP(concat(impact_summary, cell_emb)) -> (B, G)
+      delta = impact_map * scale + correction
+      pred = ctrl + gate * delta
     """
 
     def __init__(
@@ -217,6 +219,7 @@ class PerturbationDecoderV2(nn.Module):
         dropout: float = 0.1,
         impact_hidden_dims: list = None,
         gate_hidden_dims: list = None,
+        impact_summary_dim: int = 256,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -228,20 +231,25 @@ class PerturbationDecoderV2(nn.Module):
             gate_hidden_dims = [1024]
 
         # Direct residual: impact_map * learnable per-gene scale
-        # Initialized small so initial pred ≈ ctrl, but NON-ZERO for gradient flow
         self.impact_scale = nn.Parameter(torch.ones(num_genes) * 0.01)
 
-        # MLP correction conditioned on cell state: cell_emb → per-gene adjustment
-        # This captures cell-state-dependent effects that the semantic similarity misses
+        # Compress impact_map → compact perturbation fingerprint
+        self.impact_projector = nn.Sequential(
+            nn.Linear(num_genes, impact_summary_dim),
+            nn.GELU(),
+        )
+
+        # Perturbation-aware correction: sees BOTH cell state AND perturbation pattern
+        correction_input_dim = impact_summary_dim + embed_dim
         self.correction_net = build_mlp(
-            in_dim=embed_dim,
+            in_dim=correction_input_dim,
             out_dim=num_genes,
             hidden_dims=impact_hidden_dims,
             activation="gelu",
             dropout=dropout,
             final_activation=False,
         )
-        # Initialize correction to zero so it starts as pure residual
+        # Initialize correction output to zero → initial pred ≈ ctrl
         nn.init.zeros_(self.correction_net[-1].weight)
         nn.init.zeros_(self.correction_net[-1].bias)
 
@@ -258,7 +266,8 @@ class PerturbationDecoderV2(nn.Module):
         trainable = sum(p.numel() for p in self.parameters())
         print(
             f"[PerturbationDecoderV2] embed_dim={embed_dim}, "
-            f"num_genes={num_genes}, correction_hidden={impact_hidden_dims}, "
+            f"num_genes={num_genes}, summary_dim={impact_summary_dim}, "
+            f"correction_hidden={impact_hidden_dims}, "
             f"gate_hidden={gate_hidden_dims}, trainable={trainable:,}"
         )
 
@@ -272,17 +281,21 @@ class PerturbationDecoderV2(nn.Module):
         Returns:
             pred_expression: (B, G) predicted post-perturbation expression.
         """
-        # Residual path: direct scaling of semantic impact (strong gradient to cross-attn)
-        scaled_impact = impact_map * self.impact_scale           # (B, G)
+        # Residual path: direct scaling (strong gradient to cross-attn)
+        scaled_impact = impact_map * self.impact_scale              # (B, G)
 
-        # Correction path: cell-state-dependent adjustment (no impact_map bottleneck)
-        correction = self.correction_net(cell_emb)                # (B, G)
+        # Perturbation fingerprint: compress impact pattern
+        impact_summary = self.impact_projector(impact_map)           # (B, summary_dim)
+
+        # Correction: perturbation-aware + cell-state-aware
+        correction_input = torch.cat([impact_summary, cell_emb], dim=-1)  # (B, summary_dim+D)
+        correction = self.correction_net(correction_input)            # (B, G)
 
         # Combined delta
-        delta = scaled_impact + correction                        # (B, G)
+        delta = scaled_impact + correction                            # (B, G)
 
         # Gate conditioned on baseline expression
-        gate = torch.sigmoid(self.gate_net(ctrl_expression))      # (B, G)
+        gate = torch.sigmoid(self.gate_net(ctrl_expression))          # (B, G)
 
         pred_expression = ctrl_expression + gate * delta
         return pred_expression

@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 from torch.utils.data.distributed import DistributedSampler
 from torch.optim import AdamW
 from tqdm import tqdm
@@ -216,6 +216,116 @@ class WarmupCosineScheduler:
 
 
 # =====================================================================
+# Multi-dataset loading for joint training
+# =====================================================================
+def load_multi_dataset(cfg, rank, distributed):
+    """Load multiple GEARS datasets and build unified gene vocabulary.
+
+    Returns:
+        union_gene_names: sorted list of all genes across datasets
+        datasets_info: list of dicts, each with:
+            - name: dataset name
+            - pert_data: GEARS PertData
+            - gene_names: local gene list
+            - gene_remap: np.array mapping local → unified indices
+            - pert_type_id: int
+            - train_pert_genes: set of training perturbation gene names
+            - subgroup: GEARS subgroup dict or None
+    """
+    import numpy as np
+    from gears import PertData
+    import gears.pertdata as _gears_pd
+
+    # Monkey-patch GEARS
+    _orig_get_pert_idx = _gears_pd.PertData.get_pert_idx
+    def _safe_get_pert_idx(self, pert_category, adata_):
+        try:
+            return _orig_get_pert_idx(self, pert_category, adata_)
+        except IndexError:
+            pert_idx = []
+            for p in pert_category:
+                idx = np.where(p == self.gene_names)[0]
+                pert_idx.append(idx[0] if len(idx) > 0 else -1)
+            return pert_idx
+    _gears_pd.PertData.get_pert_idx = _safe_get_pert_idx
+
+    dataset_names = list(cfg.training.datasets)
+    all_gene_sets = []
+    datasets_info = []
+
+    for ds_name in dataset_names:
+        ds_cfg = cfg.dataset_configs[ds_name]
+        data_name = ds_cfg.data_name
+        split_mode = ds_cfg.get("split_mode", "simulation")
+        pert_type_id = int(getattr(ds_cfg, 'pert_type', 0))
+
+        if is_main_process(rank):
+            print(f"[MultiDataset] Loading {data_name}...")
+
+        pert_data = PertData(cfg.paths.perturb_data_dir)
+        local_path = os.path.join(cfg.paths.perturb_data_dir, data_name)
+
+        if is_main_process(rank):
+            if os.path.exists(local_path):
+                pert_data.load(data_path=local_path)
+            else:
+                pert_data.load(data_name=data_name)
+            pert_data.prepare_split(split=split_mode, seed=cfg.training.seed)
+        if distributed:
+            dist.barrier()
+        if not is_main_process(rank):
+            if os.path.exists(local_path):
+                pert_data.load(data_path=local_path)
+            else:
+                pert_data.load(data_name=data_name)
+            pert_data.prepare_split(split=split_mode, seed=cfg.training.seed)
+
+        # Gene names
+        if "gene_name" in pert_data.adata.var.columns:
+            gene_names = list(pert_data.adata.var["gene_name"])
+        else:
+            gene_names = list(pert_data.adata.var_names)
+
+        all_gene_sets.append(set(gene_names))
+
+        # Training perturbation genes
+        train_pert_genes = set()
+        if hasattr(pert_data, "set2conditions") and "train" in pert_data.set2conditions:
+            for pname in pert_data.set2conditions["train"]:
+                for g in pname.split("+"):
+                    if g != "ctrl":
+                        train_pert_genes.add(g)
+
+        datasets_info.append({
+            "name": ds_name,
+            "pert_data": pert_data,
+            "gene_names": gene_names,
+            "pert_type_id": pert_type_id,
+            "train_pert_genes": train_pert_genes,
+            "subgroup": getattr(pert_data, "subgroup", None),
+        })
+
+    # Build union gene vocabulary
+    union_genes = sorted(set.union(*all_gene_sets))
+    union_g2i = {g: i for i, g in enumerate(union_genes)}
+
+    if is_main_process(rank):
+        print(f"[MultiDataset] Union: {len(union_genes)} genes from {len(dataset_names)} datasets")
+        for info in datasets_info:
+            local_n = len(info["gene_names"])
+            overlap = len(set(info["gene_names"]) & set(union_genes))
+            print(f"  {info['name']}: {local_n} genes ({overlap} in union)")
+
+    # Build gene_remap for each dataset: local_idx → unified_idx
+    for info in datasets_info:
+        local_genes = info["gene_names"]
+        remap = np.array([union_g2i[g] for g in local_genes], dtype=np.int64)
+        info["gene_remap"] = remap
+
+    return union_genes, datasets_info
+
+
+# =====================================================================
 # Main training function
 # =====================================================================
 def train(cfg):
@@ -235,148 +345,209 @@ def train(cfg):
         logger.info(f"Device: {device}, world_size: {world_size}")
 
     # ------------------------------------------------------------------
-    # 1. Load GEARS data
+    # 1-4. Load data, build model & datasets
     # ------------------------------------------------------------------
-    from gears import PertData
-
-    dataset_name = cfg.training.dataset
-    # Use dataset-specific config if available, otherwise use defaults
-    if hasattr(cfg, "dataset_configs") and dataset_name in cfg.dataset_configs:
-        ds_cfg = cfg.dataset_configs[dataset_name]
-        data_name = ds_cfg.data_name
-        split_mode = ds_cfg.get("split_mode", "simulation")
-        pert_type_id = int(getattr(ds_cfg, 'pert_type', 0))
-    else:
-        data_name = dataset_name
-        split_mode = "simulation"
-        pert_type_id = 0
-
-    if is_main_process(rank):
-        logger.info(f"Loading GEARS dataset: {data_name} (split_mode={split_mode})")
-
-    # Monkey-patch GEARS get_pert_idx to skip genes missing from expression matrix
     import numpy as np
-    import gears.pertdata as _gears_pd
-    _orig_get_pert_idx = _gears_pd.PertData.get_pert_idx
 
-    def _safe_get_pert_idx(self, pert_category, adata_):
-        try:
-            return _orig_get_pert_idx(self, pert_category, adata_)
-        except IndexError:
-            # Fallback: skip genes not found in gene_names
-            pert_idx = []
-            for p in pert_category:
-                idx = np.where(p == self.gene_names)[0]
-                if len(idx) > 0:
-                    pert_idx.append(idx[0])
-                else:
-                    pert_idx.append(-1)
-            return pert_idx
+    multi_dataset = hasattr(cfg.training, 'datasets') and cfg.training.datasets
 
-    _gears_pd.PertData.get_pert_idx = _safe_get_pert_idx
+    if multi_dataset:
+        # ============================================================
+        # MULTI-DATASET MODE (joint K562 + RPE1)
+        # ============================================================
+        union_gene_names, datasets_info = load_multi_dataset(cfg, rank, distributed)
+        num_genes = len(union_gene_names)
+        gene_names = union_gene_names
 
-    # Let rank 0 do data loading/preprocessing first, then other ranks load from cache
-    pert_data = PertData(cfg.paths.perturb_data_dir)
-    local_path = os.path.join(cfg.paths.perturb_data_dir, data_name)
-    if is_main_process(rank):
-        if os.path.exists(local_path):
-            pert_data.load(data_path=local_path)
-        else:
-            pert_data.load(data_name=data_name)
-        pert_data.prepare_split(split=split_mode, seed=cfg.training.seed)
-    if distributed:
-        dist.barrier()  # wait for rank 0 to finish preprocessing
-    if not is_main_process(rank):
-        if os.path.exists(local_path):
-            pert_data.load(data_path=local_path)
-        else:
-            pert_data.load(data_name=data_name)
-        pert_data.prepare_split(split=split_mode, seed=cfg.training.seed)
+        if is_main_process(rank):
+            logger.info(f"Joint training: {num_genes} unified genes")
 
-    # Extract subgroup info for per-subgroup evaluation (Norman: combo_seen0/1/2, unseen_single)
-    pert_subgroup = getattr(pert_data, "subgroup", None)
-    # Collect training perturbation genes for fallback classification
-    train_pert_genes = set()
-    if hasattr(pert_data, "set2conditions") and "train" in pert_data.set2conditions:
-        for pname in pert_data.set2conditions["train"]:
-            for g in pname.split("+"):
-                if g != "ctrl":
-                    train_pert_genes.add(g)
+        # Load facet embeddings (must cover union genes)
+        saved = torch.load(cfg.paths.facet_embeddings, map_location="cpu", weights_only=False)
+        gene_to_facet_idx = saved["gene_to_idx"]
+        if is_main_process(rank):
+            logger.info(f"Loaded facet tensor with {len(gene_to_facet_idx)} genes")
 
-    # Gene names list
-    if "gene_name" in pert_data.adata.var.columns:
-        gene_names = list(pert_data.adata.var["gene_name"])
+        # Initialize model
+        if is_main_process(rank):
+            logger.info("Initializing DyGenePT model...")
+        model = DyGenePT(cfg, num_genes=num_genes, gene_names=gene_names)
+        model = model.to(device)
+        if distributed:
+            model = DDP(model, device_ids=[local_rank])
+        raw_model = model.module if distributed else model
+
+        # scGPT vocab for tokenization
+        scgpt_vocab = getattr(raw_model.cell_encoder, 'vocab', None)
+        if scgpt_vocab is None:
+            from scgpt.tokenizer import GeneVocab
+            scgpt_vocab = GeneVocab.from_file(Path(cfg.paths.scgpt_checkpoint) / "vocab.json")
+
+        pace_cfg = getattr(cfg, 'pert_aware_cell_encoding', None)
+        pert_aware_enabled = pace_cfg is not None and getattr(pace_cfg, 'enabled', False)
+        force_include_pert = getattr(pace_cfg, 'force_include_pert_genes', True) if pace_cfg else True
+        pert_gene_dropout = float(getattr(cfg.training, 'pert_gene_dropout', 0.0))
+
+        # Build per-dataset train/val/test with gene remapping
+        if is_main_process(rank):
+            print("Creating dataloaders (multi-dataset)...")
+
+        train_datasets = []
+        val_datasets = {}    # {ds_name: dataset}
+        test_datasets = {}   # {ds_name: dataset}
+        all_train_pert_genes = set()
+        pert_subgroup = None  # not used for single-gene Replogle
+
+        for info in datasets_info:
+            ds_common = dict(
+                gene_to_facet_idx=gene_to_facet_idx,
+                scgpt_vocab=scgpt_vocab,
+                gene_names=info["gene_names"],
+                max_seq_len=cfg.cell_encoder.max_seq_len,
+                pert_type_id=info["pert_type_id"],
+                pert_aware=pert_aware_enabled,
+                force_include_pert_genes=force_include_pert,
+                gene_remap=info["gene_remap"],
+                num_genes_out=num_genes,
+            )
+
+            train_ds = PerturbationDataset(
+                info["pert_data"], "train", **ds_common,
+                pert_gene_dropout=pert_gene_dropout,
+            )
+            val_ds = PerturbationDataset(info["pert_data"], "val", **ds_common)
+            test_ds = PerturbationDataset(info["pert_data"], "test", **ds_common)
+
+            train_datasets.append(train_ds)
+            val_datasets[info["name"]] = val_ds
+            test_datasets[info["name"]] = test_ds
+            all_train_pert_genes.update(info["train_pert_genes"])
+
+        train_dataset = ConcatDataset(train_datasets)
+        train_pert_genes = all_train_pert_genes
+
+        # For early stopping, use the first dataset's val set
+        # (will evaluate all datasets during val)
+        val_dataset = None  # signal to use multi-dataset eval
+
     else:
-        gene_names = list(pert_data.adata.var_names)
-    num_genes = len(gene_names)
-    if is_main_process(rank):
-        logger.info(f"Number of genes: {num_genes}")
+        # ============================================================
+        # SINGLE-DATASET MODE (legacy)
+        # ============================================================
+        from gears import PertData
+        import gears.pertdata as _gears_pd
 
-    # ------------------------------------------------------------------
-    # 2. Load precomputed gene facet data
-    # ------------------------------------------------------------------
-    saved = torch.load(cfg.paths.facet_embeddings, map_location="cpu", weights_only=False)
-    gene_to_facet_idx = saved["gene_to_idx"]
-    if is_main_process(rank):
-        logger.info(f"Loaded facet tensor with {len(gene_to_facet_idx)} genes")
+        dataset_name = cfg.training.dataset
+        if hasattr(cfg, "dataset_configs") and dataset_name in cfg.dataset_configs:
+            ds_cfg = cfg.dataset_configs[dataset_name]
+            data_name = ds_cfg.data_name
+            split_mode = ds_cfg.get("split_mode", "simulation")
+            pert_type_id = int(getattr(ds_cfg, 'pert_type', 0))
+        else:
+            data_name = dataset_name
+            split_mode = "simulation"
+            pert_type_id = 0
 
-    # ------------------------------------------------------------------
-    # 3. Initialize model
-    # ------------------------------------------------------------------
-    if is_main_process(rank):
-        logger.info("Initializing DyGenePT model...")
-    model = DyGenePT(cfg, num_genes=num_genes, gene_names=gene_names)
-    model = model.to(device)
+        if is_main_process(rank):
+            logger.info(f"Loading GEARS dataset: {data_name} (split_mode={split_mode})")
 
-    if distributed:
-        model = DDP(model, device_ids=[local_rank])
+        # Monkey-patch GEARS
+        _orig_get_pert_idx = _gears_pd.PertData.get_pert_idx
+        def _safe_get_pert_idx(self, pert_category, adata_):
+            try:
+                return _orig_get_pert_idx(self, pert_category, adata_)
+            except IndexError:
+                pert_idx = []
+                for p in pert_category:
+                    idx = np.where(p == self.gene_names)[0]
+                    pert_idx.append(idx[0] if len(idx) > 0 else -1)
+                return pert_idx
+        _gears_pd.PertData.get_pert_idx = _safe_get_pert_idx
 
-    # Unwrap helper: access underlying module for saving/loading/eval
-    raw_model = model.module if distributed else model
+        pert_data = PertData(cfg.paths.perturb_data_dir)
+        local_path = os.path.join(cfg.paths.perturb_data_dir, data_name)
+        if is_main_process(rank):
+            if os.path.exists(local_path):
+                pert_data.load(data_path=local_path)
+            else:
+                pert_data.load(data_name=data_name)
+            pert_data.prepare_split(split=split_mode, seed=cfg.training.seed)
+        if distributed:
+            dist.barrier()
+        if not is_main_process(rank):
+            if os.path.exists(local_path):
+                pert_data.load(data_path=local_path)
+            else:
+                pert_data.load(data_name=data_name)
+            pert_data.prepare_split(split=split_mode, seed=cfg.training.seed)
 
-    # ------------------------------------------------------------------
-    # 4. Build datasets
-    # ------------------------------------------------------------------
-    scgpt_vocab = getattr(raw_model.cell_encoder, 'vocab', None)
-    if scgpt_vocab is None:
-        # Ablation mode: load scGPT vocab directly for dataset tokenisation
-        from scgpt.tokenizer import GeneVocab
-        scgpt_vocab = GeneVocab.from_file(Path(cfg.paths.scgpt_checkpoint) / "vocab.json")
+        pert_subgroup = getattr(pert_data, "subgroup", None)
+        train_pert_genes = set()
+        if hasattr(pert_data, "set2conditions") and "train" in pert_data.set2conditions:
+            for pname in pert_data.set2conditions["train"]:
+                for g in pname.split("+"):
+                    if g != "ctrl":
+                        train_pert_genes.add(g)
 
-    # PACE config
-    pace_cfg = getattr(cfg, 'pert_aware_cell_encoding', None)
-    pert_aware_enabled = pace_cfg is not None and getattr(pace_cfg, 'enabled', False)
-    force_include_pert = getattr(pace_cfg, 'force_include_pert_genes', True) if pace_cfg else True
+        if "gene_name" in pert_data.adata.var.columns:
+            gene_names = list(pert_data.adata.var["gene_name"])
+        else:
+            gene_names = list(pert_data.adata.var_names)
+        num_genes = len(gene_names)
+        if is_main_process(rank):
+            logger.info(f"Number of genes: {num_genes}")
 
-    # Perturbation gene dropout (data augmentation, training only)
-    pert_gene_dropout = float(getattr(cfg.training, 'pert_gene_dropout', 0.0))
+        saved = torch.load(cfg.paths.facet_embeddings, map_location="cpu", weights_only=False)
+        gene_to_facet_idx = saved["gene_to_idx"]
+        if is_main_process(rank):
+            logger.info(f"Loaded facet tensor with {len(gene_to_facet_idx)} genes")
 
-    if is_main_process(rank):
-        print("Creating dataloaders....")
-    train_dataset = PerturbationDataset(
-        pert_data, "train", gene_to_facet_idx, scgpt_vocab, gene_names,
-        max_seq_len=cfg.cell_encoder.max_seq_len,
-        pert_type_id=pert_type_id,
-        pert_aware=pert_aware_enabled,
-        force_include_pert_genes=force_include_pert,
-        pert_gene_dropout=pert_gene_dropout,
-    )
-    val_dataset = PerturbationDataset(
-        pert_data, "val", gene_to_facet_idx, scgpt_vocab, gene_names,
-        max_seq_len=cfg.cell_encoder.max_seq_len,
-        pert_type_id=pert_type_id,
-        pert_aware=pert_aware_enabled,
-        force_include_pert_genes=force_include_pert,
-    )
-    test_dataset = PerturbationDataset(
-        pert_data, "test", gene_to_facet_idx, scgpt_vocab, gene_names,
-        max_seq_len=cfg.cell_encoder.max_seq_len,
-        pert_type_id=pert_type_id,
-        pert_aware=pert_aware_enabled,
-        force_include_pert_genes=force_include_pert,
-    )
+        if is_main_process(rank):
+            logger.info("Initializing DyGenePT model...")
+        model = DyGenePT(cfg, num_genes=num_genes, gene_names=gene_names)
+        model = model.to(device)
+        if distributed:
+            model = DDP(model, device_ids=[local_rank])
+        raw_model = model.module if distributed else model
 
-    # Use DistributedSampler for training data in DDP
+        scgpt_vocab = getattr(raw_model.cell_encoder, 'vocab', None)
+        if scgpt_vocab is None:
+            from scgpt.tokenizer import GeneVocab
+            scgpt_vocab = GeneVocab.from_file(Path(cfg.paths.scgpt_checkpoint) / "vocab.json")
+
+        pace_cfg = getattr(cfg, 'pert_aware_cell_encoding', None)
+        pert_aware_enabled = pace_cfg is not None and getattr(pace_cfg, 'enabled', False)
+        force_include_pert = getattr(pace_cfg, 'force_include_pert_genes', True) if pace_cfg else True
+        pert_gene_dropout = float(getattr(cfg.training, 'pert_gene_dropout', 0.0))
+
+        if is_main_process(rank):
+            print("Creating dataloaders....")
+        train_dataset = PerturbationDataset(
+            pert_data, "train", gene_to_facet_idx, scgpt_vocab, gene_names,
+            max_seq_len=cfg.cell_encoder.max_seq_len,
+            pert_type_id=pert_type_id,
+            pert_aware=pert_aware_enabled,
+            force_include_pert_genes=force_include_pert,
+            pert_gene_dropout=pert_gene_dropout,
+        )
+        val_dataset = PerturbationDataset(
+            pert_data, "val", gene_to_facet_idx, scgpt_vocab, gene_names,
+            max_seq_len=cfg.cell_encoder.max_seq_len,
+            pert_type_id=pert_type_id,
+            pert_aware=pert_aware_enabled,
+            force_include_pert_genes=force_include_pert,
+        )
+        test_dataset = PerturbationDataset(
+            pert_data, "test", gene_to_facet_idx, scgpt_vocab, gene_names,
+            max_seq_len=cfg.cell_encoder.max_seq_len,
+            pert_type_id=pert_type_id,
+            pert_aware=pert_aware_enabled,
+            force_include_pert_genes=force_include_pert,
+        )
+        val_datasets = None
+        test_datasets = None
+
+    # DataLoader (shared for both modes)
     train_sampler = DistributedSampler(
         train_dataset, num_replicas=world_size, rank=rank, shuffle=True
     ) if distributed else None
@@ -391,7 +562,7 @@ def train(cfg):
         pin_memory=True,
     )
     if is_main_process(rank):
-        print("Done!")
+        print(f"Done! Train samples: {len(train_dataset)}")
 
     # ------------------------------------------------------------------
     # 5. Optimizer and scheduler
@@ -567,10 +738,39 @@ def train(cfg):
         if (epoch + 1) % cfg.training.eval_every == 0:
             if is_main_process(rank):
                 logger.info("Evaluating on validation set...")
-                val_metrics = evaluate_model(
-                    raw_model, val_dataset, device, cfg, collate_perturbation_batch,
-                    subgroup=pert_subgroup, train_pert_genes=train_pert_genes,
-                )
+
+                # Multi-dataset eval: evaluate each dataset separately, average for early stopping
+                if val_datasets is not None:
+                    all_scores = []
+                    val_metrics = {}
+                    for ds_name, ds in val_datasets.items():
+                        ds_metrics = evaluate_model(
+                            raw_model, ds, device, cfg, collate_perturbation_batch,
+                            subgroup=None, train_pert_genes=train_pert_genes,
+                        )
+                        score = ds_metrics["pearson_delta_all"]
+                        all_scores.append(score)
+                        logger.info(
+                            f"  [{ds_name}] P_d_all={score:.4f}, "
+                            f"P_d_top20={ds_metrics['pearson_delta_top20']:.4f}, "
+                            f"dir_acc={ds_metrics['direction_accuracy']:.4f}"
+                        )
+                        for k, v in ds_metrics.items():
+                            val_metrics[f"{ds_name}/{k}"] = v
+                        if use_wandb:
+                            import wandb
+                            wandb.log({f"val/{ds_name}/{k}": v for k, v in ds_metrics.items()})
+                    # Average score for early stopping
+                    val_metrics["pearson_delta_all"] = sum(all_scores) / len(all_scores)
+                    val_metrics["mse"] = 0  # placeholder
+                    val_metrics["pearson_top20"] = 0
+                    val_metrics["pearson_delta_top20"] = 0
+                    val_metrics["direction_accuracy"] = 0
+                else:
+                    val_metrics = evaluate_model(
+                        raw_model, val_dataset, device, cfg, collate_perturbation_batch,
+                        subgroup=pert_subgroup, train_pert_genes=train_pert_genes,
+                    )
                 logger.info(
                     f"Val metrics: mse={val_metrics['mse']:.4f}, "
                     f"pearson_top20={val_metrics['pearson_top20']:.4f}, "
@@ -635,16 +835,36 @@ def train(cfg):
             torch.load(output_dir / "best_model.pt", map_location=device, weights_only=True)
         )
 
-        test_metrics = evaluate_model(
-            raw_model, test_dataset, device, cfg, collate_perturbation_batch,
-            subgroup=pert_subgroup, train_pert_genes=train_pert_genes,
-        )
-        logger.info("=" * 60)
-        logger.info("TEST RESULTS:")
-        for k, v in test_metrics.items():
-            if not k.startswith("_"):
-                logger.info(f"  {k}: {v:.4f}")
-        logger.info("=" * 60)
+        test_metrics = {}
+        if test_datasets is not None:
+            # Multi-dataset test evaluation
+            for ds_name, ds in test_datasets.items():
+                ds_metrics = evaluate_model(
+                    raw_model, ds, device, cfg, collate_perturbation_batch,
+                    subgroup=None, train_pert_genes=train_pert_genes,
+                )
+                logger.info(f"\n{'='*60}")
+                logger.info(f"TEST RESULTS — {ds_name}:")
+                for k, v in ds_metrics.items():
+                    if not k.startswith("_"):
+                        logger.info(f"  {k}: {v:.4f}")
+                        test_metrics[f"{ds_name}/{k}"] = v
+                logger.info("=" * 60)
+
+                subgroup_table = format_subgroup_table(ds_metrics)
+                if subgroup_table:
+                    logger.info("\n" + subgroup_table)
+        else:
+            test_metrics = evaluate_model(
+                raw_model, test_dataset, device, cfg, collate_perturbation_batch,
+                subgroup=pert_subgroup, train_pert_genes=train_pert_genes,
+            )
+            logger.info("=" * 60)
+            logger.info("TEST RESULTS:")
+            for k, v in test_metrics.items():
+                if not k.startswith("_"):
+                    logger.info(f"  {k}: {v:.4f}")
+            logger.info("=" * 60)
 
         # Print per-subgroup breakdown table
         subgroup_table = format_subgroup_table(test_metrics)
