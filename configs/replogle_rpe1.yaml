@@ -38,8 +38,8 @@ facets:
   names:
     - "Molecular Function & Protein Interactions"
     - "Biological Pathways & Signaling"
-    - "Gene Regulation & Transcriptional Control"
-    - "Loss-of-Function Impact & Cellular Fitness"
+    - "Regulatory Network & Expression Dependencies"
+    - "Essentiality & Cellular Stress Response"
 
 # ========================
 # Embedding Model (Module 1 - Text Encoding)

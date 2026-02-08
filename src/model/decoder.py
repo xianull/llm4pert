@@ -196,16 +196,18 @@ class PerturbationDecoder(nn.Module):
 
 
 class PerturbationDecoderV2(nn.Module):
-    """V2 decoder: impact map → nonlinear transform → gated prediction.
+    """V2 decoder: impact map → residual scaling + MLP correction → gated prediction.
 
     The SemanticCrossAttention produces per-gene semantic impact scores.
-    These are NOT expression deltas — they're similarity scores. This decoder
-    transforms them into expression changes via a learnable nonlinear mapping.
+    The decoder converts these to expression deltas via:
+      1. A direct residual path: impact_map * learned_scale (strong gradient to cross-attn)
+      2. An MLP correction conditioned on cell state (nonlinear refinement)
+      3. A gate conditioned on ctrl_expression (context filter)
 
     Architecture:
-      delta = impact_transform(impact_map, cell_emb)  -> (B, G)
-      gate = sigmoid(gate_net(ctrl_expression))        -> (B, G)
-      pred = ctrl + gate * delta
+      raw_delta = impact_map * scale + MLP(cell_emb)  -> (B, G)
+      gate = sigmoid(gate_net(ctrl_expression))         -> (B, G)
+      pred = ctrl + gate * raw_delta
     """
 
     def __init__(
@@ -225,16 +227,23 @@ class PerturbationDecoderV2(nn.Module):
         if gate_hidden_dims is None:
             gate_hidden_dims = [1024]
 
-        # Transform semantic impact → expression delta
-        # impact_map (B, G) + cell_emb features → per-gene delta
-        self.impact_transform = build_mlp(
-            in_dim=num_genes + embed_dim,
+        # Direct residual: impact_map * learnable per-gene scale
+        # Initialized small so initial pred ≈ ctrl, but NON-ZERO for gradient flow
+        self.impact_scale = nn.Parameter(torch.ones(num_genes) * 0.01)
+
+        # MLP correction conditioned on cell state: cell_emb → per-gene adjustment
+        # This captures cell-state-dependent effects that the semantic similarity misses
+        self.correction_net = build_mlp(
+            in_dim=embed_dim,
             out_dim=num_genes,
             hidden_dims=impact_hidden_dims,
             activation="gelu",
             dropout=dropout,
             final_activation=False,
         )
+        # Initialize correction to zero so it starts as pure residual
+        nn.init.zeros_(self.correction_net[-1].weight)
+        nn.init.zeros_(self.correction_net[-1].bias)
 
         # Gate: ctrl expression → per-gene activation filter
         self.gate_net = build_mlp(
@@ -246,15 +255,10 @@ class PerturbationDecoderV2(nn.Module):
             final_activation=False,
         )
 
-        # Small init for impact_transform output layer → initial pred ≈ ctrl
-        # build_mlp with final_activation=False guarantees last element is nn.Linear
-        nn.init.zeros_(self.impact_transform[-1].weight)
-        nn.init.zeros_(self.impact_transform[-1].bias)
-
         trainable = sum(p.numel() for p in self.parameters())
         print(
             f"[PerturbationDecoderV2] embed_dim={embed_dim}, "
-            f"num_genes={num_genes}, impact_hidden={impact_hidden_dims}, "
+            f"num_genes={num_genes}, correction_hidden={impact_hidden_dims}, "
             f"gate_hidden={gate_hidden_dims}, trainable={trainable:,}"
         )
 
@@ -268,12 +272,17 @@ class PerturbationDecoderV2(nn.Module):
         Returns:
             pred_expression: (B, G) predicted post-perturbation expression.
         """
-        # Concatenate impact + cell context → nonlinear delta prediction
-        decoder_input = torch.cat([impact_map, cell_emb], dim=-1)  # (B, G+D)
-        delta = self.impact_transform(decoder_input)                # (B, G)
+        # Residual path: direct scaling of semantic impact (strong gradient to cross-attn)
+        scaled_impact = impact_map * self.impact_scale           # (B, G)
+
+        # Correction path: cell-state-dependent adjustment (no impact_map bottleneck)
+        correction = self.correction_net(cell_emb)                # (B, G)
+
+        # Combined delta
+        delta = scaled_impact + correction                        # (B, G)
 
         # Gate conditioned on baseline expression
-        gate = torch.sigmoid(self.gate_net(ctrl_expression))        # (B, G)
+        gate = torch.sigmoid(self.gate_net(ctrl_expression))      # (B, G)
 
         pred_expression = ctrl_expression + gate * delta
         return pred_expression

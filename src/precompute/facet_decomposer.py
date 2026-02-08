@@ -14,26 +14,49 @@ from src.precompute.llm_utils import extract_json_from_llm_response
 DEFAULT_FACET_NAMES = [
     "Molecular Function & Protein Interactions",
     "Biological Pathways & Signaling",
-    "Gene Regulation & Transcriptional Control",
-    "Loss-of-Function Impact & Cellular Fitness",
+    "Regulatory Network & Expression Dependencies",
+    "Essentiality & Cellular Stress Response",
 ]
 
 SYSTEM_PROMPT_TEMPLATE = """You are a molecular biology expert specializing in CRISPRi \
-perturbation experiments. Given a gene description, decompose its biological role into \
-exactly {K} facets focused on predicting the transcriptomic impact of gene knockdown. \
-For each facet, write a concise paragraph (2-4 sentences) describing the gene's role. \
-If the gene has NO known function in a facet, output exactly the string "<NULL>".
+perturbation experiments on essential genes. Given a gene description, decompose its \
+biological role into exactly {K} facets. The goal is to predict which other genes' \
+expression levels change when this gene is knocked down via CRISPRi.
+
+For each facet, write a concise paragraph (2-4 sentences). If the gene has NO known \
+function in a facet, output exactly "<NULL>".
 
 The {K} facets are:
 {facet_list}
 
-IMPORTANT:
-- Focus on information relevant to predicting what happens when this gene is knocked down.
-- For protein interactions, prioritize experimentally validated physical interactions and protein complex membership.
-- For loss-of-function impact, include essentiality and cell-type-specific effects if known.
-- Output ONLY a valid JSON object with the facet names as keys and description strings (or "<NULL>") as values.
-- Do NOT fabricate functions. If the gene description does not mention a relevant role, use "<NULL>".
-- Keep each facet description focused and factual (2-4 sentences max)."""
+GUIDELINES for each facet:
+
+1. Molecular Function & Protein Interactions:
+   Describe the gene product's core molecular activity, enzymatic function, direct \
+physical binding partners, and protein complex membership. Prioritize experimentally \
+validated interactions.
+
+2. Biological Pathways & Signaling:
+   Which biological pathways does this gene participate in? What is its position in \
+signaling cascades (upstream regulator, core component, or downstream effector)?
+
+3. Regulatory Network & Expression Dependencies:
+   What upstream transcription factors, signaling pathways, or cellular conditions \
+control this gene's expression? When this gene's activity is reduced, through what \
+indirect routes might other genes' expression be affected? Consider feedback loops, \
+compensatory pathways, and downstream transcriptional programs.
+
+4. Essentiality & Cellular Stress Response:
+   Why is this gene essential for cell survival or proliferation? What cellular process \
+fails without it? What stress response or compensatory mechanisms are activated when \
+this gene is partially depleted? Does its essentiality differ between cancer cells \
+and normal cells (e.g., synthetic lethality)?
+
+OUTPUT FORMAT:
+- Valid JSON object with the {K} facet names as keys.
+- Values: description strings or "<NULL>" if genuinely unknown.
+- Do NOT fabricate functions. Use "<NULL>" if evidence is insufficient.
+- Keep each description focused and factual (2-4 sentences max)."""
 
 
 class FacetDecomposer:
