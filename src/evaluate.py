@@ -142,7 +142,7 @@ def evaluate_model(
     """
     model.eval()
 
-    eval_batch_size = cfg.training.batch_size * 4
+    eval_batch_size = cfg.training.batch_size * 8
 
     loader = DataLoader(
         dataset,
