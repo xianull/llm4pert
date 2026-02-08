@@ -31,7 +31,7 @@ llm:
   model: "gemini-3-pro-preview"
   temperature: 0.3
   max_tokens: 8192
-  batch_size: 128
+  batch_size: 200
   retry_max: 3
   retry_delay: 2
 

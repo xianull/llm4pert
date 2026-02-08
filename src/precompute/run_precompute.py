@@ -379,7 +379,8 @@ def main():
     )
     parser.add_argument(
         "--dataset", type=str, default=None,
-        help="Override dataset name (norman, adamson, dixit)."
+        help="Override dataset name. Use comma-separated for union: "
+             "'replogle_k562_essential,replogle_rpe1_essential'"
     )
     parser.add_argument(
         "--backend", type=str, default=None, choices=["local", "api"],
@@ -392,7 +393,25 @@ def main():
     # Apply CLI overrides
     if args.backend is not None:
         cfg.embedding.backend = args.backend
-    dataset_name = args.dataset or cfg.training.dataset
+    # Resolve dataset name(s)
+    if args.dataset is not None:
+        dataset_names = [d.strip() for d in args.dataset.split(",")]
+    elif hasattr(cfg.training, 'datasets') and cfg.training.datasets:
+        dataset_names = list(cfg.training.datasets)
+    else:
+        dataset_names = [cfg.training.dataset]
+
+    # Load gene list (union if multiple datasets)
+    if len(dataset_names) == 1:
+        gene_list, _ = get_gene_list_from_gears(cfg.paths.perturb_data_dir, dataset_names[0])
+    else:
+        all_genes = set()
+        for ds_name in dataset_names:
+            ds_genes, _ = get_gene_list_from_gears(cfg.paths.perturb_data_dir, ds_name)
+            all_genes.update(ds_genes)
+            print(f"  {ds_name}: {len(ds_genes)} genes")
+        gene_list = sorted(all_genes)
+        print(f"[run_precompute] Union of {len(dataset_names)} datasets: {len(gene_list)} genes")
 
     # Determine which steps to run
     step = args.step
@@ -403,9 +422,6 @@ def main():
     run_2_5 = step in ("all", "2.5", "regen")
     run_3 = step in ("all", "3", "embed")
     run_4 = step in ("all", "4", "impute")
-
-    # Load gene list from GEARS
-    gene_list, _ = get_gene_list_from_gears(cfg.paths.perturb_data_dir, dataset_name)
 
     corpus = None
     if run_1:

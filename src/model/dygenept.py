@@ -69,30 +69,32 @@ class PerturbationInteraction(nn.Module):
 # V2 helper: Contextualizer (FiLM conditioning)
 # =====================================================================
 class Contextualizer(nn.Module):
-    """FiLM conditioning: injects cell state into perturbed gene facets.
+    """Per-facet FiLM conditioning: injects cell state into perturbed gene facets.
 
-    Makes Q environment-specific: same TP53 gets different Q in K562 vs RPE1.
+    Makes Q environment-specific AND facet-specific: different facets get
+    different modulation in different cell types.
 
-        gamma, beta = MLP(cell_emb)
-        context_Q = LayerNorm(gamma * pert_facets + beta)
+        gamma_k, beta_k = MLP(cell_emb)  for each facet k
+        context_Q[:, :, k, :] = LayerNorm(gamma_k * facets[:, :, k, :] + beta_k)
 
-    The cell state modulates which dimensions of each facet embedding are
-    amplified or suppressed, enabling the downstream cross-attention to
-    produce cell-type-specific impact maps.
+    In K562 (p53-null): might amplify "Essentiality" facet, suppress "Regulatory Network"
+    In RPE1 (p53-wt):  might amplify "Regulatory Network" facet, different essentiality pattern
     """
 
-    def __init__(self, embed_dim: int, dropout: float = 0.1,
+    def __init__(self, embed_dim: int, num_facets: int = 4, dropout: float = 0.1,
                  hidden_dims: list = None):
         super().__init__()
         self.embed_dim = embed_dim
+        self.num_facets = num_facets
 
         if hidden_dims is None:
             hidden_dims = [embed_dim]
 
-        # FiLM net: cell_emb -> hidden layers -> gamma + beta (2 * embed_dim)
+        # Per-facet FiLM: cell_emb → K separate (gamma, beta) pairs
+        # Output: K * 2 * D = num_facets * 2 * embed_dim
         self.film_net = build_mlp(
             in_dim=embed_dim,
-            out_dim=embed_dim * 2,  # gamma + beta
+            out_dim=num_facets * embed_dim * 2,  # K * (gamma + beta)
             hidden_dims=hidden_dims,
             activation="gelu",
             final_activation=False,
@@ -100,14 +102,38 @@ class Contextualizer(nn.Module):
         self.layer_norm = nn.LayerNorm(embed_dim)
         self.dropout = nn.Dropout(dropout)
 
-        # Initialize gamma close to 1, beta close to 0
-        # build_mlp with final_activation=False guarantees last element is nn.Linear
+        # Initialize gamma close to 1, beta close to 0 for each facet
         nn.init.zeros_(self.film_net[-1].weight)
         nn.init.zeros_(self.film_net[-1].bias)
-        # Set gamma bias to 1 (first half of output)
-        self.film_net[-1].bias.data[:embed_dim] = 1.0
+        # Set gamma bias to 1 for all K facets
+        for k in range(num_facets):
+            start = k * embed_dim * 2
+            self.film_net[-1].bias.data[start:start + embed_dim] = 1.0
 
-        print(f"[Contextualizer] embed_dim={embed_dim}, hidden_dims={hidden_dims}")
+        print(f"[Contextualizer] embed_dim={embed_dim}, num_facets={num_facets}, "
+              f"per-facet FiLM, hidden_dims={hidden_dims}")
+
+    def forward(
+        self,
+        cell_emb: torch.Tensor,       # (B, D)
+        pert_facets: torch.Tensor,     # (B, P, K, D)
+    ) -> torch.Tensor:
+        """
+        Returns:
+            context_Q: (B, P, K, D) cell-conditioned facet representations.
+        """
+        B = cell_emb.size(0)
+        D = self.embed_dim
+        K = self.num_facets
+
+        film_out = self.film_net(cell_emb)                     # (B, K*2*D)
+        film_out = film_out.view(B, K, 2, D)                   # (B, K, 2, D)
+        gamma = film_out[:, :, 0, :].unsqueeze(1)              # (B, 1, K, D)
+        beta = film_out[:, :, 1, :].unsqueeze(1)               # (B, 1, K, D)
+
+        # Per-facet modulation: different gamma/beta for each facet
+        out = self.layer_norm(gamma * pert_facets + beta)       # (B, P, K, D)
+        return self.dropout(out)
 
     def forward(
         self,
@@ -238,7 +264,7 @@ class DyGenePT(nn.Module):
 
         # Module 2.5: Contextualizer (FiLM)
         self.contextualizer = Contextualizer(
-            target_dim, dropout=ctx_dropout, hidden_dims=ctx_hidden,
+            target_dim, num_facets=num_facets, dropout=ctx_dropout, hidden_dims=ctx_hidden,
         )
 
         # Build aligned genome facets: (num_genes, K, D) — frozen, no adapter
