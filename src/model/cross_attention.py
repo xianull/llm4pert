@@ -142,6 +142,7 @@ class SemanticCrossAttention(nn.Module):
     def __init__(
         self,
         embed_dim: int = 768,
+        facet_dim: int = None,
         num_facets: int = 8,
         dropout: float = 0.1,
         topk: int = 200,
@@ -149,13 +150,14 @@ class SemanticCrossAttention(nn.Module):
     ):
         super().__init__()
         self.embed_dim = embed_dim
+        self.facet_dim = facet_dim or embed_dim
         self.num_facets = num_facets
         self.topk = topk
 
-        # Shared adapter: semantic space → perturbation space (nonlinear)
-        # Applied to BOTH Q-side and K-side genome facets
+        # Shared adapter: facet_dim (e.g. 4096 from Qwen) → embed_dim (768 working space)
+        # Nonlinear projection with bottleneck
         self.facet_adapter = nn.Sequential(
-            nn.Linear(embed_dim, adapter_bottleneck),
+            nn.Linear(self.facet_dim, adapter_bottleneck),
             nn.GELU(),
             nn.Linear(adapter_bottleneck, embed_dim),
             nn.LayerNorm(embed_dim),
