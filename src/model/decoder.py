@@ -72,25 +72,23 @@ class PerturbationDecoder(nn.Module):
             self.effect_proj = nn.Linear(backbone_hidden, d_out)
             self.gene_bias = nn.Parameter(torch.zeros(num_genes))
 
-            # Project gene facet embeddings -> gene_embeddings buffer
+            # Project gene facet embeddings -> gene_embeddings
             assert gene_facet_tensor is not None, (
                 "gene_facet_tensor is required when gene_embed_aware=True"
             )
             # gene_facet_tensor: (G, K, 768) -> mean pool -> (G, 768)
             gene_mean = gene_facet_tensor.mean(dim=1)  # (G, 768)
+            self.register_buffer("_gene_mean", gene_mean)  # frozen raw embeddings
+
             self.gene_embed_proj = nn.Sequential(
                 nn.Linear(gene_facet_tensor.shape[-1], d_out),
                 nn.GELU(),
                 nn.LayerNorm(d_out),
             )
-            # Compute initial gene embeddings and register as buffer
-            with torch.no_grad():
-                gene_embeddings = self.gene_embed_proj(gene_mean)  # (G, d_out)
-            self.register_buffer("gene_embeddings", gene_embeddings)
 
             print(
                 f"[PerturbationDecoder] gene_embed_aware=True, d_out={d_out}, "
-                f"gene_embeddings={gene_embeddings.shape}"
+                f"gene_mean={gene_mean.shape}"
             )
         else:
             self.expression_decoder = nn.Sequential(
@@ -152,7 +150,13 @@ class PerturbationDecoder(nn.Module):
         # 5. Decode to full transcriptome (delta prediction)
         #    cell_latent skip connection: provide unmixed cell state to decoder
         decoder_input = torch.cat([pred_latent, cell_latent], dim=-1)  # (B, latent_dim*2)
-        delta = self.expression_decoder(decoder_input)  # (B, num_genes)
+        if self.gene_embed_aware:
+            h = self.expression_backbone(decoder_input)       # (B, 1024)
+            effect = self.effect_proj(h)                       # (B, d_out)
+            gene_emb = self.gene_embed_proj(self._gene_mean)   # (G, d_out)
+            delta = effect @ gene_emb.t() + self.gene_bias     # (B, G)
+        else:
+            delta = self.expression_decoder(decoder_input)    # (B, G)
 
         # 6. Residual gate: conditioned on perturbation latent + baseline expression
         ctrl_encoded = self.ctrl_encoder(ctrl_expression)  # (B, latent_dim)

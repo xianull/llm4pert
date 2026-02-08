@@ -266,7 +266,7 @@ def train(cfg):
     # ------------------------------------------------------------------
     if is_main_process(rank):
         logger.info("Initializing DyGenePT model...")
-    model = DyGenePT(cfg, num_genes=num_genes)
+    model = DyGenePT(cfg, num_genes=num_genes, gene_names=gene_names)
     model = model.to(device)
 
     if distributed:
@@ -509,13 +509,7 @@ def train(cfg):
                     logger.info(f"New best model saved (pearson_delta_all={best_val_score:.4f})")
                     if use_wandb:
                         import wandb
-                        artifact = wandb.Artifact(
-                            f"best-model-{wandb.run.id}",
-                            type="model",
-                            metadata={"epoch": epoch + 1, "pearson_delta_all": best_val_score},
-                        )
-                        artifact.add_file(str(ckpt_path))
-                        wandb.log_artifact(artifact)
+                        wandb.save(str(ckpt_path), base_path=str(output_dir))
                 else:
                     patience_counter += 1
                     logger.info(
@@ -594,9 +588,21 @@ def main():
         "--config", type=str, default="configs/default.yaml",
         help="Path to configuration YAML file."
     )
+    parser.add_argument(
+        "overrides", nargs="*",
+        help="Config overrides in dot notation, e.g. cell_encoder.model_name=mlp"
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+
+    # Apply command-line overrides (e.g. cell_encoder.model_name=mlp)
+    if args.overrides:
+        from omegaconf import OmegaConf
+        overrides = OmegaConf.from_dotlist(args.overrides)
+        cfg = OmegaConf.merge(cfg, overrides)
+        OmegaConf.resolve(cfg)
+
     train(cfg)
 
 

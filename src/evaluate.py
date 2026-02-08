@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader
 
 METRIC_NAMES = [
     "mse",
+    "mse_de",
     "mae",
     "pearson_delta_all",
     "pearson_top20",
@@ -58,6 +59,7 @@ def _compute_pert_metrics(
     pred_delta = pred_de - mean_ctrl[de_genes]
     true_delta = truth_de - mean_ctrl[de_genes]
 
+    mse_de = float(np.mean((pred_delta - true_delta) ** 2))
     mae_delta = float(np.mean(np.abs(pred_delta - true_delta)))
 
     if len(pred_de) >= 2 and np.std(pred_de) > 0 and np.std(truth_de) > 0:
@@ -75,6 +77,7 @@ def _compute_pert_metrics(
 
     return {
         "mse": mse,
+        "mse_de": mse_de,
         "mae": mae_delta,
         "pearson_delta_all": r_delta_all,
         "pearson_top20": r,
@@ -262,7 +265,7 @@ def format_subgroup_table(metrics: Dict[str, float]) -> str:
     lines.append("=" * 104)
 
     header = f"{'Subgroup':<20} {'N':>4}"
-    for m in ["pearson_delta_all", "pearson_delta_top20", "pearson_top20", "mse", "mae", "direction_accuracy"]:
+    for m in ["pearson_delta_all", "pearson_delta_top20", "pearson_top20", "mse", "mse_de", "mae", "direction_accuracy"]:
         short = m.replace("pearson_delta_all", "P_d_all").replace(
             "pearson_delta_top20", "P_delta").replace(
             "pearson_top20", "P_abs").replace(
@@ -274,7 +277,7 @@ def format_subgroup_table(metrics: Dict[str, float]) -> str:
     for group in groups:
         n = int(metrics.get(f"_n_{group}", 0))
         row = f"{group:<20} {n:>4}"
-        for m in ["pearson_delta_all", "pearson_delta_top20", "pearson_top20", "mse", "mae", "direction_accuracy"]:
+        for m in ["pearson_delta_all", "pearson_delta_top20", "pearson_top20", "mse", "mse_de", "mae", "direction_accuracy"]:
             val = metrics.get(f"{group}/{m}", float("nan"))
             row += f" {val:>10.4f}"
         lines.append(row)
@@ -282,7 +285,7 @@ def format_subgroup_table(metrics: Dict[str, float]) -> str:
     # Overall
     n_total = sum(int(metrics.get(f"_n_{g}", 0)) for g in groups)
     row = f"{'OVERALL':<20} {n_total:>4}"
-    for m in ["pearson_delta_all", "pearson_delta_top20", "pearson_top20", "mse", "mae", "direction_accuracy"]:
+    for m in ["pearson_delta_all", "pearson_delta_top20", "pearson_top20", "mse", "mse_de", "mae", "direction_accuracy"]:
         val = metrics.get(m, float("nan"))
         row += f" {val:>10.4f}"
     lines.append("-" * 104)
@@ -311,7 +314,7 @@ def format_comparison_table(
 
     baseline = langpert_baselines.get(dataset_name, {})
 
-    for metric_name in ["pearson_delta_top20", "mae", "mse"]:
+    for metric_name in ["pearson_delta_top20", "mae", "mse_de"]:
         ours = dygenept_metrics.get(metric_name, float("nan"))
         theirs = baseline.get(metric_name, "N/A")
         theirs_str = f"{theirs:.4f}" if isinstance(theirs, float) else str(theirs)

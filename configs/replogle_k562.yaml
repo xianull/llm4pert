@@ -102,6 +102,8 @@ perturbation_type:
 decoder:
   hidden_dims: [512, 256]
   dropout: 0.1
+  gene_embed_aware: true
+  gene_embed_dim: 512
   use_gene_graph: false
   num_go_layers: 2
 

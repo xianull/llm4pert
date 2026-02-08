@@ -13,6 +13,7 @@ import torch.nn as nn
 
 from .gene_encoder import GeneEncoder
 from .cell_encoder import CellEncoder
+from .ablation_cell_encoder import MLPCellEncoder, ConstantCellEncoder
 from .cross_attention import FacetCrossAttention
 from .decoder import PerturbationDecoder
 
@@ -56,7 +57,7 @@ class PerturbationInteraction(nn.Module):
 class DyGenePT(nn.Module):
     """Complete DyGenePT model for perturbation response prediction."""
 
-    def __init__(self, cfg, num_genes: int):
+    def __init__(self, cfg, num_genes: int, gene_names: list = None):
         super().__init__()
 
         # Module 1: Gene facet embeddings (static, frozen)
@@ -67,14 +68,49 @@ class DyGenePT(nn.Module):
             freeze=True,
         )
 
-        # Module 2: Cell state encoder (scGPT backbone)
-        self.cell_encoder = CellEncoder(cfg)
+        # Module 2: Cell state encoder
+        cell_encoder_type = getattr(cfg.cell_encoder, 'model_name', 'scGPT')
+        self._cell_encoder_type = cell_encoder_type
+        target_dim = cfg.cross_attention.hidden_dim
+
+        if cell_encoder_type == 'mlp':
+            self.cell_encoder = MLPCellEncoder(num_genes, target_dim)
+        elif cell_encoder_type == 'constant':
+            self.cell_encoder = ConstantCellEncoder(target_dim)
+        else:
+            self.cell_encoder = CellEncoder(cfg)
 
         # Module 3: Cross-attention (Sparsemax)
         self.cross_attention = FacetCrossAttention(cfg)
 
+        # Build aligned gene facet tensor for decoder (gene_embed_aware mode)
+        gene_embed_aware = getattr(cfg.decoder, 'gene_embed_aware', False)
+        aligned_facet_tensor = None
+        if gene_embed_aware:
+            assert gene_names is not None, (
+                "gene_names is required when decoder.gene_embed_aware=True"
+            )
+            facet_tensor = self.gene_encoder.facet_tensor     # (G_vocab, K, D)
+            gene_to_idx = self.gene_encoder.gene_to_idx       # {symbol: int}
+            # Build (num_genes, K, D) aligned to gene_names order
+            K, D = facet_tensor.shape[1], facet_tensor.shape[2]
+            aligned = torch.zeros(num_genes, K, D)
+            matched = 0
+            for i, name in enumerate(gene_names):
+                if name in gene_to_idx:
+                    aligned[i] = facet_tensor[gene_to_idx[name]]
+                    matched += 1
+            aligned_facet_tensor = aligned
+            print(
+                f"[DyGenePT] Gene-embed alignment: {matched}/{num_genes} "
+                f"genes matched to facet embeddings"
+            )
+
         # Module 4: Perturbation decoder (latent arithmetic)
-        self.decoder = PerturbationDecoder(cfg, num_genes)
+        self.decoder = PerturbationDecoder(
+            cfg, num_genes,
+            gene_facet_tensor=aligned_facet_tensor,
+        )
 
         # Module 3.5: Cross-perturbation interaction (for combinatorial perts)
         self.pert_interaction = PerturbationInteraction(
@@ -121,10 +157,13 @@ class DyGenePT(nn.Module):
                 'pred_expression': (B, G) predicted post-perturbation expression
                 'attention_weights': (B, P, H, K) sparse facet attention weights
         """
-        # Module 2: Cell state query (with optional PACE pert_flags)
-        cell_query = self.cell_encoder(
-            gene_ids, values, padding_mask, pert_flags=pert_flags
-        )  # (B, D)
+        # Module 2: Cell state query
+        if self._cell_encoder_type == 'scGPT':
+            cell_query = self.cell_encoder(
+                gene_ids, values, padding_mask, pert_flags=pert_flags
+            )  # (B, D)
+        else:
+            cell_query = self.cell_encoder(ctrl_expression)  # (B, D)
 
         # Module 1: Gene facet lookup (returns confidence if available)
         gene_facets, confidence = self.gene_encoder(

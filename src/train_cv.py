@@ -385,7 +385,7 @@ def train_cv(cfg):
         set_seed(cfg.training.seed + fold_idx)
 
         # Re-initialize model for each fold
-        model = DyGenePT(cfg, num_genes=num_genes)
+        model = DyGenePT(cfg, num_genes=num_genes, gene_names=gene_names)
         model = model.to(device)
 
         train_subset = Subset(full_dataset, train_indices)
