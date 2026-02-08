@@ -117,11 +117,11 @@ training:
   dataset: "norman"           # norman / adamson / dixit / replogle_k562_essential / replogle_rpe1_essential
   seed: 42
   epochs: 20
-  batch_size: 64
+  batch_size: 128
   lr: 1.0e-4
   weight_decay: 1.0e-5
   scheduler: "cosine"
-  warmup_steps: 500
+  warmup_steps: 100
   gradient_clip: 1.0
   eval_every: 1               # 每 N 个 epoch 评估
   save_best: true

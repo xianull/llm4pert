@@ -465,15 +465,25 @@ def train(cfg):
                     import wandb
                     wandb.log({f"val/{k}": v for k, v in val_metrics.items()})
 
-                # Save best model (select by pearson_delta_top20, higher is better)
-                val_score = val_metrics["pearson_delta_top20"]
+                # Save best model (select by pearson_delta_all, higher is better)
+                val_score = val_metrics["pearson_delta_all"]
                 if val_score > best_val_score:
                     best_val_score = val_score
                     patience_counter = 0
+                    ckpt_path = output_dir / "best_model.pt"
                     torch.save(
-                        raw_model.state_dict(), output_dir / "best_model.pt"
+                        raw_model.state_dict(), ckpt_path
                     )
-                    logger.info(f"New best model saved (pearson_delta={best_val_score:.4f})")
+                    logger.info(f"New best model saved (pearson_delta_all={best_val_score:.4f})")
+                    if use_wandb:
+                        import wandb
+                        artifact = wandb.Artifact(
+                            f"best-model-{wandb.run.id}",
+                            type="model",
+                            metadata={"epoch": epoch + 1, "pearson_delta_all": best_val_score},
+                        )
+                        artifact.add_file(str(ckpt_path))
+                        wandb.log_artifact(artifact)
                 else:
                     patience_counter += 1
                     logger.info(
