@@ -761,12 +761,12 @@ def train(cfg):
                         if use_wandb:
                             import wandb
                             wandb.log({f"val/{ds_name}/{k}": v for k, v in ds_metrics.items()})
-                    # Average score for early stopping
-                    val_metrics["pearson_delta_all"] = sum(all_scores) / len(all_scores)
-                    val_metrics["mse"] = 0  # placeholder
-                    val_metrics["pearson_top20"] = 0
-                    val_metrics["pearson_delta_top20"] = 0
-                    val_metrics["direction_accuracy"] = 0
+                    # Average all metrics for logging
+                    avg_keys = ["pearson_delta_all", "mse", "pearson_top20",
+                                "pearson_delta_top20", "direction_accuracy"]
+                    for mk in avg_keys:
+                        vals = [val_metrics.get(f"{dn}/{mk}", 0) for dn in val_datasets]
+                        val_metrics[mk] = sum(vals) / len(vals) if vals else 0
                 else:
                     val_metrics = evaluate_model(
                         raw_model, val_dataset, device, cfg, collate_perturbation_batch,
@@ -868,12 +868,23 @@ def train(cfg):
             logger.info("=" * 60)
 
         # Print per-subgroup breakdown table
-        subgroup_table = format_subgroup_table(test_metrics)
-        if subgroup_table:
-            logger.info("\n" + subgroup_table)
+        if not multi_dataset:
+            subgroup_table = format_subgroup_table(test_metrics)
+            if subgroup_table:
+                logger.info("\n" + subgroup_table)
 
         # Print LangPert comparison table for Replogle datasets
-        if dataset_name in ("replogle_k562_essential", "replogle_rpe1_essential"):
+        if multi_dataset:
+            for ds_name in test_datasets:
+                if ds_name in ("replogle_k562_essential", "replogle_rpe1_essential"):
+                    # Extract per-dataset metrics
+                    ds_test = {k.split("/", 1)[1]: v
+                               for k, v in test_metrics.items()
+                               if k.startswith(f"{ds_name}/")}
+                    if ds_test:
+                        comparison = format_comparison_table(ds_test, ds_name)
+                        logger.info("\n" + comparison)
+        elif dataset_name in ("replogle_k562_essential", "replogle_rpe1_essential"):
             comparison = format_comparison_table(test_metrics, dataset_name)
             logger.info("\n" + comparison)
 
