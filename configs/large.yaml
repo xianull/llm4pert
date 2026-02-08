@@ -67,6 +67,17 @@ cross_attention:
   dropout: 0.1
 
 # ========================
+# Perturbation Type Encoding
+# ========================
+perturbation_type:
+  enabled: true
+  num_types: 3
+  type_names:
+    - "activation"
+    - "repression"
+    - "knockout"
+
+# ========================
 # Perturbation Decoder (Module 4)
 # ========================
 decoder:
@@ -108,14 +119,17 @@ dataset_configs:
     data_name: "norman"
     split_mode: "simulation"
     single_gene_only: false
+    pert_type: 0                     # CRISPRa = activation
   replogle_k562_essential:
     data_name: "replogle_k562_essential"
     split_mode: "simulation"
     single_gene_only: true
+    pert_type: 1                     # CRISPRi = repression
   replogle_rpe1_essential:
     data_name: "replogle_rpe1_essential"
     split_mode: "simulation"
     single_gene_only: true
+    pert_type: 1                     # CRISPRi = repression
 
 # ========================
 # Evaluation

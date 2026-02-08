@@ -176,6 +176,7 @@ def train_one_fold(
             target_expression = batch["target_expression"].to(device)
             de_idx = batch["de_idx"].to(device)
             de_idx_len = batch["de_idx_len"].to(device)
+            pert_type_ids = batch["pert_type_ids"].to(device)
 
             output = model(
                 gene_ids=gene_ids,
@@ -183,6 +184,7 @@ def train_one_fold(
                 padding_mask=padding_mask,
                 pert_gene_indices=pert_gene_indices,
                 ctrl_expression=ctrl_expression,
+                pert_type_ids=pert_type_ids,
             )
 
             losses = compute_loss(
@@ -222,6 +224,7 @@ def train_one_fold(
                 target_expression = batch["target_expression"].to(device)
                 de_idx = batch["de_idx"].to(device)
                 de_idx_len = batch["de_idx_len"].to(device)
+                pert_type_ids = batch["pert_type_ids"].to(device)
 
                 output = model(
                     gene_ids=gene_ids,
@@ -229,6 +232,7 @@ def train_one_fold(
                     padding_mask=padding_mask,
                     pert_gene_indices=pert_gene_indices,
                     ctrl_expression=ctrl_expression,
+                    pert_type_ids=pert_type_ids,
                 )
                 losses_val = compute_loss(
                     pred=output["pred_expression"],
@@ -295,8 +299,10 @@ def train_cv(cfg):
     if hasattr(cfg, "dataset_configs") and dataset_name in cfg.dataset_configs:
         ds_cfg = cfg.dataset_configs[dataset_name]
         data_name = ds_cfg.data_name
+        pert_type_id = int(getattr(ds_cfg, 'pert_type', 0))
     else:
         data_name = dataset_name
+        pert_type_id = 0
 
     logger.info(f"Loading GEARS dataset: {data_name}")
     pert_data = PertData(cfg.paths.perturb_data_dir)
@@ -339,6 +345,7 @@ def train_cv(cfg):
             ds = PerturbationDataset(
                 pert_data, split_name, gene_to_facet_idx, scgpt_vocab, gene_names,
                 max_seq_len=cfg.cell_encoder.max_seq_len,
+                pert_type_id=pert_type_id,
             )
             full_datasets.append(ds)
         except (KeyError, RuntimeError):

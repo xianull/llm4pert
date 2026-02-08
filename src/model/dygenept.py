@@ -83,6 +83,17 @@ class DyGenePT(nn.Module):
             dropout=cfg.cross_attention.dropout,
         )
 
+        # Perturbation type embedding (activation / repression / knockout)
+        pt_cfg = getattr(cfg, 'perturbation_type', None)
+        if pt_cfg is not None and getattr(pt_cfg, 'enabled', False):
+            self.pert_type_embedding = nn.Embedding(
+                num_embeddings=pt_cfg.num_types,           # 3
+                embedding_dim=cfg.cross_attention.hidden_dim,  # 768
+            )
+            nn.init.normal_(self.pert_type_embedding.weight, std=0.02)
+        else:
+            self.pert_type_embedding = None
+
         # Print parameter summary
         self._print_param_summary()
 
@@ -101,6 +112,7 @@ class DyGenePT(nn.Module):
         padding_mask: torch.BoolTensor,      # (B, L) True=masked
         pert_gene_indices: torch.LongTensor, # (B, P) indices into facet tensor
         ctrl_expression: torch.Tensor,       # (B, G) raw control expression
+        pert_type_ids: torch.LongTensor = None,  # (B, P) perturbation type indices
     ) -> dict:
         """
         Returns:
@@ -118,10 +130,19 @@ class DyGenePT(nn.Module):
             pert_gene_indices
         )  # (B, P, K, D), optional (B, P, K)
 
-        # Module 3: Cross-attention (with confidence bias if available)
+        # Perturbation type embedding
+        pert_type_emb = None
+        if self.pert_type_embedding is not None and pert_type_ids is not None:
+            pert_type_emb = self.pert_type_embedding(pert_type_ids)  # (B, P, D)
+
+        # Module 3: Cross-attention (with confidence bias and pert type conditioning)
         dynamic_emb, attn_weights = self.cross_attention(
-            cell_query, gene_facets, confidence
+            cell_query, gene_facets, confidence, pert_type_emb=pert_type_emb
         )  # (B, P, D), (B, P, H, K)
+
+        # Add pert_type_emb as residual to dynamic_emb (belt-and-suspenders)
+        if pert_type_emb is not None:
+            dynamic_emb = dynamic_emb + pert_type_emb
 
         # Module 3.5: Cross-perturbation interaction
         # Lets co-perturbed genes exchange information before decoding.

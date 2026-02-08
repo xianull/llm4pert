@@ -82,6 +82,17 @@ cross_attention:
   dropout: 0.1
 
 # ========================
+# Perturbation Type Encoding
+# ========================
+perturbation_type:
+  enabled: true
+  num_types: 3            # 0=activation (CRISPRa), 1=repression (CRISPRi), 2=knockout (CRISPR-KO)
+  type_names:
+    - "activation"
+    - "repression"
+    - "knockout"
+
+# ========================
 # Perturbation Decoder (Module 4)
 # ========================
 decoder:
@@ -124,14 +135,17 @@ dataset_configs:
     data_name: "norman"
     split_mode: "simulation"         # GEARS simulation split (unseen combos)
     single_gene_only: false          # 包含组合扰动
+    pert_type: 0                     # CRISPRa = activation
   replogle_k562_essential:
     data_name: "replogle_k562_essential"
     split_mode: "simulation"         # 单基因只有 simulation 模式
     single_gene_only: true           # LangPert 仅评估单基因
+    pert_type: 1                     # CRISPRi = repression
   replogle_rpe1_essential:
     data_name: "replogle_rpe1_essential"
     split_mode: "simulation"         # 单基因只有 simulation 模式
     single_gene_only: true           # LangPert 仅评估单基因
+    pert_type: 1                     # CRISPRi = repression
 
 # ========================
 # Evaluation

@@ -186,9 +186,11 @@ def train(cfg):
         ds_cfg = cfg.dataset_configs[dataset_name]
         data_name = ds_cfg.data_name
         split_mode = ds_cfg.get("split_mode", "simulation")
+        pert_type_id = int(getattr(ds_cfg, 'pert_type', 0))
     else:
         data_name = dataset_name
         split_mode = "simulation"
+        pert_type_id = 0
 
     if is_main_process(rank):
         logger.info(f"Loading GEARS dataset: {data_name} (split_mode={split_mode})")
@@ -241,14 +243,17 @@ def train(cfg):
     train_dataset = PerturbationDataset(
         pert_data, "train", gene_to_facet_idx, scgpt_vocab, gene_names,
         max_seq_len=cfg.cell_encoder.max_seq_len,
+        pert_type_id=pert_type_id,
     )
     val_dataset = PerturbationDataset(
         pert_data, "val", gene_to_facet_idx, scgpt_vocab, gene_names,
         max_seq_len=cfg.cell_encoder.max_seq_len,
+        pert_type_id=pert_type_id,
     )
     test_dataset = PerturbationDataset(
         pert_data, "test", gene_to_facet_idx, scgpt_vocab, gene_names,
         max_seq_len=cfg.cell_encoder.max_seq_len,
+        pert_type_id=pert_type_id,
     )
 
     # Use DistributedSampler for training data in DDP
@@ -338,6 +343,7 @@ def train(cfg):
             target_expression = batch["target_expression"].to(device)
             de_idx = batch["de_idx"].to(device)
             de_idx_len = batch["de_idx_len"].to(device)
+            pert_type_ids = batch["pert_type_ids"].to(device)
 
             # Forward
             output = model(
@@ -346,6 +352,7 @@ def train(cfg):
                 padding_mask=padding_mask,
                 pert_gene_indices=pert_gene_indices,
                 ctrl_expression=ctrl_expression,
+                pert_type_ids=pert_type_ids,
             )
 
             # Loss

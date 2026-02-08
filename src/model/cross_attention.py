@@ -50,6 +50,7 @@ class FacetCrossAttention(nn.Module):
         cell_query: torch.Tensor,    # (B, D)
         gene_facets: torch.Tensor,   # (B, P, K, D)
         confidence: torch.Tensor = None,  # (B, P, K) optional
+        pert_type_emb: torch.Tensor = None,  # (B, P, D) optional
     ) -> tuple:
         """
         Args:
@@ -58,6 +59,10 @@ class FacetCrossAttention(nn.Module):
             confidence:  Optional confidence scores from KG imputation. (B, P, K)
                          1.0=native, (0,0.8]=imputed, 0.0=still NULL.
                          Used as log-space bias on attention scores.
+            pert_type_emb: Optional perturbation type embedding. (B, P, D)
+                         When provided, conditions Q per-perturbation so the
+                         model can select different facets for activation vs
+                         repression vs knockout.
 
         Returns:
             dynamic_emb:       (B, P, D)          context-aware gene embeddings
@@ -70,9 +75,16 @@ class FacetCrossAttention(nn.Module):
         H = int(self.num_heads)
         d = int(self.head_dim)
 
-        # --- Q from cell query ---
-        # (B, D) -> (B, D) -> (B, H, 1, d)
-        Q = self.W_Q(cell_query).view(B, H, 1, d)
+        # --- Q from cell query, optionally conditioned on perturbation type ---
+        if pert_type_emb is not None:
+            # Per-perturbation query: cell state + perturbation type
+            # cell_query: (B, D) -> (B, 1, D) -> broadcast to (B, P, D)
+            conditioned_query = cell_query.unsqueeze(1) + pert_type_emb  # (B, P, D)
+            Q_exp = self.W_Q(conditioned_query).view(B, P, H, 1, d)     # (B, P, H, 1, d)
+        else:
+            # Original behavior: single shared Q across all P
+            Q = self.W_Q(cell_query).view(B, H, 1, d)
+            Q_exp = Q.unsqueeze(1).expand(B, P, H, 1, d)
 
         # --- K, V from gene facets ---
         # (B, P, K, D) -> (B, P, K, D) -> (B, P, K, H, d) -> (B, P, H, K, d)
@@ -80,9 +92,6 @@ class FacetCrossAttention(nn.Module):
         V = self.W_V(gene_facets).view(B, P, n_facets, H, d).permute(0, 1, 3, 2, 4)
 
         # --- Attention scores ---
-        # Q: (B, H, 1, d) -> expand to (B, P, H, 1, d)
-        Q_exp = Q.unsqueeze(1).expand(B, P, H, 1, d)
-
         # scores = Q @ K^T / sqrt(d)  ->  (B, P, H, 1, K) -> squeeze -> (B, P, H, K)
         scores = torch.matmul(Q_exp, K.transpose(-2, -1)).squeeze(-2)
         scores = scores / math.sqrt(d)

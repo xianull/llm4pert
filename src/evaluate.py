@@ -70,6 +70,7 @@ def evaluate_model(
             padding_mask = batch["padding_mask"].to(device)
             pert_gene_indices = batch["pert_gene_indices"].to(device)
             ctrl_expression = batch["ctrl_expression"].to(device)
+            pert_type_ids = batch["pert_type_ids"].to(device) if "pert_type_ids" in batch else None
 
             output = model(
                 gene_ids=gene_ids,
@@ -77,6 +78,7 @@ def evaluate_model(
                 padding_mask=padding_mask,
                 pert_gene_indices=pert_gene_indices,
                 ctrl_expression=ctrl_expression,
+                pert_type_ids=pert_type_ids,
             )
 
             pred = output["pred_expression"].cpu().numpy()
