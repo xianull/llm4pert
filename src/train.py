@@ -194,13 +194,45 @@ def train(cfg):
 
     if is_main_process(rank):
         logger.info(f"Loading GEARS dataset: {data_name} (split_mode={split_mode})")
+
+    # Monkey-patch GEARS get_pert_idx to skip genes missing from expression matrix
+    import numpy as np
+    import gears.pertdata as _gears_pd
+    _orig_get_pert_idx = _gears_pd.PertData.get_pert_idx
+
+    def _safe_get_pert_idx(self, pert_category, adata_):
+        try:
+            return _orig_get_pert_idx(self, pert_category, adata_)
+        except IndexError:
+            # Fallback: skip genes not found in gene_names
+            pert_idx = []
+            for p in pert_category:
+                idx = np.where(p == self.gene_names)[0]
+                if len(idx) > 0:
+                    pert_idx.append(idx[0])
+                else:
+                    pert_idx.append(-1)
+            return pert_idx
+
+    _gears_pd.PertData.get_pert_idx = _safe_get_pert_idx
+
+    # Let rank 0 do data loading/preprocessing first, then other ranks load from cache
     pert_data = PertData(cfg.paths.perturb_data_dir)
     local_path = os.path.join(cfg.paths.perturb_data_dir, data_name)
-    if os.path.exists(local_path):
-        pert_data.load(data_path=local_path)
-    else:
-        pert_data.load(data_name=data_name)
-    pert_data.prepare_split(split=split_mode, seed=cfg.training.seed)
+    if is_main_process(rank):
+        if os.path.exists(local_path):
+            pert_data.load(data_path=local_path)
+        else:
+            pert_data.load(data_name=data_name)
+        pert_data.prepare_split(split=split_mode, seed=cfg.training.seed)
+    if distributed:
+        dist.barrier()  # wait for rank 0 to finish preprocessing
+    if not is_main_process(rank):
+        if os.path.exists(local_path):
+            pert_data.load(data_path=local_path)
+        else:
+            pert_data.load(data_name=data_name)
+        pert_data.prepare_split(split=split_mode, seed=cfg.training.seed)
 
     # Extract subgroup info for per-subgroup evaluation (Norman: combo_seen0/1/2, unseen_single)
     pert_subgroup = getattr(pert_data, "subgroup", None)

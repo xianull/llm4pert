@@ -252,12 +252,11 @@ class KGFacetImputer:
 
             round_imputed = 0
 
-            for gi in tqdm(
-                range(G),
+            for gi, gene in tqdm(
+                sorted(idx_to_gene.items()),
                 desc=f"Round {round_idx + 1}/{self.num_rounds}",
                 leave=False,
             ):
-                gene = idx_to_gene[gi]
 
                 if not current_zero[gi].any():
                     continue
