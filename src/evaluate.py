@@ -46,12 +46,15 @@ def evaluate_model(
     """
     model.eval()
 
+    eval_batch_size = cfg.training.batch_size * 2
+
     loader = DataLoader(
         dataset,
-        batch_size=cfg.training.batch_size,
+        batch_size=eval_batch_size,
         shuffle=False,
-        num_workers=4,
+        num_workers=0,
         collate_fn=collate_fn,
+        pin_memory=True,
     )
 
     # Collect predictions grouped by perturbation name

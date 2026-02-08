@@ -17,7 +17,7 @@ paths:
 # ========================
 llm:
   base_url: "https://yunwu.ai/v1"
-  api_key: "${oc.env:LLM_API_KEY,}"   # 从环境变量读取，未设置时为空
+  api_key: "${oc.env:LLM_API_KEY,\"\"}"   # 从环境变量读取，未设置时为空
   model: "gemini-3-pro-preview"
   temperature: 0.3
   max_tokens: 8192
@@ -53,7 +53,7 @@ embedding:
   # --- api backend (used when backend=api) ---
   api:
     base_url: "https://api.siliconflow.cn/v1"
-    api_key: "${oc.env:EMBED_API_KEY,}"
+    api_key: "${oc.env:EMBED_API_KEY,\"\"}"
     model: "Qwen/Qwen3-Embedding-8B"
     dimensions: 768                   # Qwen3 supports 64~4096, set 768 to align downstream
     batch_limit: 32                   # SiliconFlow max 32 per request

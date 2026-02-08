@@ -300,7 +300,11 @@ def train_cv(cfg):
 
     logger.info(f"Loading GEARS dataset: {data_name}")
     pert_data = PertData(cfg.paths.perturb_data_dir)
-    pert_data.load(data_name=data_name)
+    local_path = os.path.join(cfg.paths.perturb_data_dir, data_name)
+    if os.path.exists(local_path):
+        pert_data.load(data_path=local_path)
+    else:
+        pert_data.load(data_name=data_name)
     # Use simulation split to get GEARS to prepare the data properly,
     # then we override with our own CV folds
     pert_data.prepare_split(split="simulation", seed=cfg.training.seed)

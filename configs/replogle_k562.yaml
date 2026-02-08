@@ -22,11 +22,11 @@ paths:
 # ========================
 llm:
   base_url: "https://yunwu.ai/v1"
-  api_key: "${oc.env:LLM_API_KEY}"
+  api_key: "${oc.env:LLM_API_KEY,\"\"}"
   model: "gemini-3-pro-preview"
   temperature: 0.3
-  max_tokens: 2048
-  batch_size: 5
+  max_tokens: 8192
+  batch_size: 32
   retry_max: 3
   retry_delay: 2
 
@@ -49,8 +49,22 @@ facets:
 # Embedding Model (Module 1 - Text Encoding)
 # ========================
 embedding:
-  model_name: "microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext"
+  backend: "local"
+  # --- local backend ---
+  model_name: "FremyCompany/BioLORD-2023-M"
+  pooling: "mean"
   max_length: 256
+  # --- api backend (used when backend=api) ---
+  api:
+    base_url: "https://api.siliconflow.cn/v1"
+    api_key: "${oc.env:EMBED_API_KEY,\"\"}"
+    model: "Qwen/Qwen3-Embedding-8B"
+    dimensions: 768
+    batch_limit: 32
+    concurrency: 8
+    retry_max: 3
+    retry_delay: 2
+  # --- common ---
   batch_size: 64
   embed_dim: 768
 

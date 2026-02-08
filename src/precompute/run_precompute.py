@@ -31,10 +31,18 @@ def get_gene_list_from_gears(data_dir: str, dataset_name: str):
 
     Returns a list of gene symbol strings.
     """
+    import os
     from gears import PertData
 
     pert_data = PertData(data_dir)
-    pert_data.load(data_name=dataset_name)
+
+    # If data exists locally, pass data_path explicitly
+    # (some datasets are not in GEARS' built-in URL list)
+    local_path = os.path.join(data_dir, dataset_name)
+    if os.path.exists(local_path):
+        pert_data.load(data_path=local_path)
+    else:
+        pert_data.load(data_name=dataset_name)
 
     # GEARS stores gene names in adata.var
     if "gene_name" in pert_data.adata.var.columns:

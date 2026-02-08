@@ -193,7 +193,11 @@ def train(cfg):
     if is_main_process(rank):
         logger.info(f"Loading GEARS dataset: {data_name} (split_mode={split_mode})")
     pert_data = PertData(cfg.paths.perturb_data_dir)
-    pert_data.load(data_name=data_name)
+    local_path = os.path.join(cfg.paths.perturb_data_dir, data_name)
+    if os.path.exists(local_path):
+        pert_data.load(data_path=local_path)
+    else:
+        pert_data.load(data_name=data_name)
     pert_data.prepare_split(split=split_mode, seed=cfg.training.seed)
 
     # Gene names list
