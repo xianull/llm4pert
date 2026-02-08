@@ -175,30 +175,35 @@ class SemanticCrossAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         print(
-            f"[SemanticCrossAttention] embed_dim={embed_dim}, "
+            f"[SemanticCrossAttention] facet_dim={self.facet_dim}, "
+            f"embed_dim={embed_dim}, adapter={self.facet_dim}→{adapter_bottleneck}→{embed_dim}, "
             f"num_facets={num_facets}, topk={topk}"
         )
 
     def forward(
         self,
-        context_Q: torch.Tensor,            # (B, P, K, D)
-        genome_facets: torch.Tensor,         # (G, K, D)  frozen buffer
+        context_Q: torch.Tensor,            # (B, P, K, D) or (B, P, K, facet_dim)
+        genome_facets: torch.Tensor,         # (G, K, facet_dim)  frozen buffer
         confidence: torch.Tensor = None,     # (B, P, K)  optional
+        q_pre_adapted: bool = False,         # True if Q already went through adapter
     ) -> tuple:
         """
         Args:
             context_Q:      FiLM-conditioned perturbed gene facets.
             genome_facets:  Static facet embeddings for ALL genes (frozen).
             confidence:     KG imputation confidence for pert gene facets.
+            q_pre_adapted:  If True, skip adapter for Q (already applied externally).
 
         Returns:
             impact_scores:  (B, P, G) per-gene impact from each perturbation.
             facet_weights:  (K,) normalized facet channel weights.
         """
-        # Adapt frozen embeddings: semantic → perturbation space
-        # context_Q already went through adapter in gene_encoder, apply to Q here too
-        Q = self.W_Q(self.facet_adapter(context_Q))      # (B, P, K, D)
-        K = self.W_K(self.facet_adapter(genome_facets))   # (G, K, D)
+        # Adapt: facet_dim → embed_dim (nonlinear projection)
+        if q_pre_adapted:
+            Q = self.W_Q(context_Q)                            # (B, P, K, embed_dim)
+        else:
+            Q = self.W_Q(self.facet_adapter(context_Q))        # (B, P, K, embed_dim)
+        K = self.W_K(self.facet_adapter(genome_facets))        # (G, K, embed_dim)
 
         # Per-facet channel similarity via einsum
         # (B, P, K, D) × (G, K, D) -> (B, P, K, G)

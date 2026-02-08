@@ -261,8 +261,10 @@ class DyGenePT(nn.Module):
 
         # Module 3: Semantic cross-attention (pert → genome)
         topk = getattr(cfg.cross_attention, 'topk', 200)
+        facet_dim = aligned_facets.shape[-1]  # actual dim from tensor (768 or 4096)
         self.cross_attention = SemanticCrossAttention(
             embed_dim=target_dim,
+            facet_dim=facet_dim,
             num_facets=actual_k,
             dropout=cfg.cross_attention.dropout,
             topk=topk,
@@ -398,16 +400,21 @@ class DyGenePT(nn.Module):
         cell_emb = self.cell_encoder(ctrl_expression)               # (B, D)
 
         # Module 1: Perturbed gene facet lookup
-        pert_facets, confidence = self.gene_encoder(pert_gene_indices)  # (B,P,K,D), (B,P,K)
+        pert_facets, confidence = self.gene_encoder(pert_gene_indices)  # (B,P,K,facet_dim)
 
-        # Module 2.5: Contextualizer — inject cell state into Q
-        context_Q = self.contextualizer(cell_emb, pert_facets)      # (B, P, K, D)
+        # Adapt facets: facet_dim → embed_dim (shared adapter in cross_attention)
+        # Apply adapter BEFORE FiLM so FiLM operates in the working space
+        pert_facets_adapted = self.cross_attention.facet_adapter(pert_facets)  # (B,P,K,embed_dim)
 
-        # Module 3: Semantic cross-attention (pert → genome)
+        # Module 2.5: Contextualizer — inject cell state into adapted Q
+        context_Q = self.contextualizer(cell_emb, pert_facets_adapted)  # (B, P, K, embed_dim)
+
+        # Module 3: Semantic cross-attention (Q already adapted, K adapted inside)
         impact_scores, facet_w = self.cross_attention(
             context_Q,
             self.cross_attention._genome_facets,
             confidence,
+            q_pre_adapted=True,  # skip adapter for Q (already done above)
         )  # (B, P, G), (K,)
 
         # Combine across perturbations: sum valid slots
