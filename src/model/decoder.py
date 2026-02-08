@@ -237,7 +237,7 @@ class PerturbationDecoderV2(nn.Module):
             gate_hidden_dims = [1024]
 
         # Direct residual: impact_map * learnable per-gene scale
-        self.impact_scale = nn.Parameter(torch.ones(num_genes) * 0.01)
+        self.impact_scale = nn.Parameter(torch.ones(num_genes) * 1.0)
 
         # Compress impact_map → compact perturbation fingerprint
         self.impact_projector = nn.Sequential(
@@ -268,6 +268,12 @@ class PerturbationDecoderV2(nn.Module):
                 nn.Linear(gene_facet_tensor.shape[-1], effect_dim),
                 nn.GELU(),
                 nn.LayerNorm(effect_dim),
+            )
+            # Per-gene learnable weight: breaks factored constraint,
+            # gives each gene its own projection direction.
+            # Initialized small → starts as pure factored, learns per-gene corrections.
+            self.per_gene_weight = nn.Parameter(
+                torch.randn(num_genes, effect_dim) * 0.01
             )
             self._has_gene_emb = True
         else:
@@ -338,7 +344,10 @@ class PerturbationDecoderV2(nn.Module):
             # Normalized dot product with learnable temperature
             effect_norm = nn.functional.normalize(effect, dim=-1)           # (B, effect_dim)
             gene_emb_norm = nn.functional.normalize(gene_emb, dim=-1)      # (G, effect_dim)
-            factored_delta = self.logit_scale * (effect_norm @ gene_emb_norm.t()) + self.gene_bias
+            # Hybrid: semantic factored (gene_emb) + per-gene learnable
+            factored = effect_norm @ gene_emb_norm.t()                      # (B, G) semantic
+            per_gene = (effect.unsqueeze(1) * self.per_gene_weight.unsqueeze(0)).sum(-1)  # (B, G) free
+            factored_delta = self.logit_scale * (factored + per_gene) + self.gene_bias
         else:
             factored_delta = self.direct_output(effect)                     # (B, G)
 

@@ -95,15 +95,17 @@ def compute_loss(
         # Standard MSE
         loss_mse = nn.functional.mse_loss(pred, target)
 
-    # --- Direction loss weighted by |delta| (improved GEARS-style) ---
+    # --- Soft direction loss: tanh instead of sign (smooth, no dead zones) ---
     if direction_weight > 0:
         pred_delta = pred - ctrl_expression
         true_delta = target - ctrl_expression
-        # sign mismatch: [sign(pred_delta) - sign(true_delta)]^2 ∈ {0, 4}
-        sign_diff_sq = (torch.sign(pred_delta) - torch.sign(true_delta)) ** 2
-        # Weight by |true_delta|: DE genes (large delta) dominate, noise genes ignored
+        # Soft sign via tanh: continuous & differentiable everywhere
+        k = 10.0  # temperature: higher = sharper (closer to sign), lower = smoother
+        pred_soft = torch.tanh(k * pred_delta)
+        true_soft = torch.tanh(k * true_delta)
+        # Weighted by |true_delta|: DE genes dominate, noise genes ignored
         weights = true_delta.abs()
-        loss_dir = (sign_diff_sq * weights).sum() / weights.sum().clamp(min=1e-6)
+        loss_dir = ((pred_soft - true_soft) ** 2 * weights).sum() / weights.sum().clamp(min=1e-6)
     else:
         loss_dir = torch.tensor(0.0, device=device)
 

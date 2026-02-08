@@ -125,7 +125,7 @@ decoder:
   hidden_dims: [512, 256]
   dropout: 0.1
   gene_embed_aware: true
-  gene_embed_dim: 512
+  gene_embed_dim: 2048
   gene_embed_lr_scale: 0.1
   use_gene_graph: false
   num_go_layers: 2
@@ -151,11 +151,11 @@ training:
   save_best: true
   early_stopping_patience: 8
   loss:
-    mse_weight: 1.0              # autofocus replaces plain MSE when gamma>0
-    de_mse_weight: 2.0           # additional MSE on top-20 DE genes
-    direction_weight: 1.0        # GEARS-style direction loss on ALL genes
-    rank_weight: 0.0             # disabled (autofocus handles this)
-    autofocus_gamma: 1.0         # GEARS: |error|^(2+gamma), gamma=1 → cubic
+    mse_weight: 3.0              # UP: autofocus 主力 (was 1.0)
+    de_mse_weight: 5.0           # UP: DE 基因强聚焦 (was 2.0)
+    direction_weight: 0.1        # DOWN: 已饱和，减少梯度浪费 (was 1.0)
+    rank_weight: 0.5             # 启用排序 loss (was 0)
+    autofocus_gamma: 2.0         # UP: error^4，更强聚焦 DE (was 1.0)
   pert_gene_dropout: 0.0
   cross_validation:
     enabled: false
