@@ -278,7 +278,11 @@ def train(cfg):
     # ------------------------------------------------------------------
     # 4. Build datasets
     # ------------------------------------------------------------------
-    scgpt_vocab = raw_model.cell_encoder.vocab
+    scgpt_vocab = getattr(raw_model.cell_encoder, 'vocab', None)
+    if scgpt_vocab is None:
+        # Ablation mode: load scGPT vocab directly for dataset tokenisation
+        from scgpt.tokenizer import GeneVocab
+        scgpt_vocab = GeneVocab.from_file(Path(cfg.paths.scgpt_checkpoint) / "vocab.json")
 
     # PACE config
     pace_cfg = getattr(cfg, 'pert_aware_cell_encoding', None)
