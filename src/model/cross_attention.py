@@ -146,7 +146,7 @@ class SemanticCrossAttention(nn.Module):
         num_facets: int = 8,
         dropout: float = 0.1,
         topk: int = 200,
-        adapter_bottleneck: int = 256,
+        adapter_bottleneck: int = 512,
     ):
         super().__init__()
         self.embed_dim = embed_dim

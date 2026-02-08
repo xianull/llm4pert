@@ -299,9 +299,12 @@ class PerturbationDecoderV2(nn.Module):
         # Cross-gene MLP (GEARS-inspired): captures inter-gene dependencies
         # After per-gene predictions, this learns "if gene A goes up,
         # gene B should go down" type of cross-gene effects.
-        cross_gene_dim = 256
+        cross_gene_dim = 512
         self.cross_gene_mlp = nn.Sequential(
             nn.Linear(num_genes, cross_gene_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(cross_gene_dim, cross_gene_dim),
             nn.GELU(),
             nn.Dropout(dropout),
         )
