@@ -294,9 +294,10 @@ class PerturbationDecoderV2(nn.Module):
             nn.Linear(effect_dim, head_dim, bias=False)
             for _ in range(self.num_effect_heads)
         ])
+        # Input from gene_embed_proj output (effect_dim), NOT raw facet embedding
+        # This ensures gene_embed_proj stays in the compute graph for DDP
         self.head_gene_projectors = nn.ModuleList([
-            nn.Linear(gene_facet_tensor.shape[-1] if gene_facet_tensor is not None else effect_dim,
-                       head_dim, bias=False)
+            nn.Linear(effect_dim, head_dim, bias=False)
             for _ in range(self.num_effect_heads)
         ]) if self._has_gene_emb else None
         self.head_merge = nn.Linear(self.num_effect_heads, 1, bias=False)
@@ -374,10 +375,11 @@ class PerturbationDecoderV2(nn.Module):
             gene_emb_norm = nn.functional.normalize(gene_emb, dim=-1)      # (G, effect_dim)
 
             # Multi-head: each head captures different aspects of gene response
+            # Routes through gene_embed_proj → gene_emb to keep all params in compute graph
             head_outputs = []
             for i in range(self.num_effect_heads):
                 eff_h = self.head_projectors[i](effect)                     # (B, head_dim)
-                gem_h = self.head_gene_projectors[i](self._gene_mean)       # (G, head_dim)
+                gem_h = self.head_gene_projectors[i](gene_emb)              # (G, head_dim)
                 gem_h = nn.functional.normalize(gem_h, dim=-1)
                 head_outputs.append(eff_h @ gem_h.t())                      # (B, G)
             # Stack and merge: (B, G, num_heads) -> (B, G)

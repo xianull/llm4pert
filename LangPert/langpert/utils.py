@@ -17,56 +17,72 @@ def extract_genes_from_output(response: str) -> Tuple[List[str], Optional[str]]:
     Returns:
         Tuple of (gene_list, reasoning_text)
     """
-    # Case 1: Response is already valid JSON
+    # Try to parse JSON from the response (handle code blocks first)
+    json_str = response.strip()
+
+    # Strip markdown code blocks if present
+    code_block = re.search(r'```(?:json)?\s*([\s\S]*?)```', json_str)
+    if code_block:
+        json_str = code_block.group(1).strip()
+
+    # Try parsing as JSON
+    data = None
     try:
-        data = json.loads(response.strip())
-        if 'kNN' in data:
-            return data.get('kNN', []), data.get('reasoning')
+        data = json.loads(json_str)
     except json.JSONDecodeError:
-        pass
+        # Find any JSON object in the text
+        obj_match = re.search(r'\{[\s\S]*\}', json_str)
+        if obj_match:
+            try:
+                data = json.loads(obj_match.group())
+            except json.JSONDecodeError:
+                pass
 
-    # Case 2: JSON in code blocks (markdown format) or XML-style tags
-    json_pattern = r'(?:```(?:json)?\s*((?:\{|\[).*?(?:\}|\]))(?:\n|$)\s*```|<json>\s*((?:\{|\[).*?(?:\}|\]))\s*</json>)'
-    matches = re.findall(json_pattern, response, re.DOTALL)
+    if isinstance(data, dict):
+        genes = _extract_genes_from_dict(data)
+        reasoning = data.get('reasoning') or data.get('explanation')
+        if genes:
+            return genes, reasoning
 
-    for match in matches:
-        # match is a tuple (markdown_group, xml_group), use whichever is non-empty
-        json_str = match[0] if match[0] else match[1]
-        if not json_str:
-            continue
-        try:
-            data = json.loads(json_str.strip())
-            if 'kNN' in data:
-                return data.get('kNN', []), data.get('reasoning')
-        except json.JSONDecodeError:
-            continue
-
-    # Case 3: Find JSON-like structures in text
-    json_pattern = r'\{[^{}]*"kNN"[^{}]*\}'
-    matches = re.findall(json_pattern, response, re.DOTALL)
-
-    for match in matches:
-        try:
-            cleaned = match.strip()
-            data = json.loads(cleaned)
-            if 'kNN' in data:
-                return data.get('kNN', []), data.get('reasoning')
-        except json.JSONDecodeError:
-            continue
-
-    # Case 4: Extract from array patterns like ["Gene1", "Gene2"]
+    # Fallback: extract array patterns like ["Gene1", "Gene2"]
     array_pattern = r'\["[^"]+"\s*(?:,\s*"[^"]+"\s*)*\]'
     matches = re.findall(array_pattern, response)
-
     for match in matches:
         try:
             genes = json.loads(match)
-            if genes and isinstance(genes, list):
+            if genes and isinstance(genes, list) and all(isinstance(g, str) for g in genes):
                 return genes, None
         except json.JSONDecodeError:
             continue
 
     return [], None
+
+
+def _extract_genes_from_dict(data: dict) -> List[str]:
+    """Extract gene names from various JSON response formats."""
+    # Format 1: {"kNN": ["Gene1", "Gene2"]}
+    if 'kNN' in data:
+        val = data['kNN']
+        if isinstance(val, list):
+            return [g for g in val if isinstance(g, str)]
+
+    # Format 2: {"similar_genes": [{"gene": "Gene1"}, ...]} or {"similar_genes": ["Gene1", ...]}
+    for key in ('similar_genes', 'genes', 'selected_genes', 'gene_list', 'LIST', 'list'):
+        if key in data:
+            val = data[key]
+            if isinstance(val, list):
+                result = []
+                for item in val:
+                    if isinstance(item, str):
+                        result.append(item)
+                    elif isinstance(item, dict):
+                        g = item.get('gene') or item.get('name') or item.get('gene_name')
+                        if g:
+                            result.append(g)
+                if result:
+                    return result
+
+    return []
 
 
 def calculate_knn_mean(knn_genes: List[str], obs_mean: Dict[str, np.ndarray],

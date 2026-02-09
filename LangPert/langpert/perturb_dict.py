@@ -229,56 +229,33 @@ class PerturbDict:
     def get_split_data(
         self, k: int = 5, fold: int = 0, seed: int = 42
     ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
-        """Get train/test split using k-fold CV matching the DyGenePT/LangPert protocol.
+        """Get train/test split using sklearn KFold — matches PerturbDict exactly.
 
-        Splits perturbation names (not cells) into k folds:
-          1. Collect all non-control condition names
-          2. Sort → shuffle with seed
-          3. Divide into k equal-sized folds
-          4. Selected fold → test, remainder → train
-
-        This matches the ``get_perturbation_folds`` implementation used in
-        the companion DyGenePT cross-validation pipeline.
-
-        Args:
-            k: Number of folds for cross-validation.
-            fold: Which fold to use as the test set (0-indexed).
-            seed: Random seed for shuffling.
-
-        Returns:
-            (train_data, test_data): Each is {condition_name: mean_expression_array}
+        Algorithm (from PerturbDict/perturbdict/splits.py):
+          1. sorted_perts = sorted(list(self.perturbations))
+          2. KFold(n_splits=k, shuffle=True, random_state=seed)
+          3. Return train_perts[fold], test_perts[fold]
         """
-        # Collect all non-control perturbation names (same filter as DyGenePT)
+        from sklearn.model_selection import KFold
+
         all_conditions = sorted([
             name for name in self._cond_to_cell_indices
             if name != "ctrl" and not name.startswith("ctrl")
         ])
+        perts = np.array(all_conditions)
 
-        # Shuffle perturbation names (matches get_perturbation_folds logic)
-        rng = np.random.RandomState(seed)
-        pert_names = list(all_conditions)  # already sorted
-        rng.shuffle(pert_names)
+        kf = KFold(n_splits=k, shuffle=True, random_state=seed)
+        all_folds = list(kf.split(perts))
+        train_idx, test_idx = all_folds[fold]
 
-        # Split into k folds (last fold gets the remainder)
-        fold_size = len(pert_names) // k
-        test_perts = set()
-        for fold_idx in range(k):
-            start = fold_idx * fold_size
-            if fold_idx == k - 1:
-                chunk = pert_names[start:]
-            else:
-                chunk = pert_names[start : start + fold_size]
-            if fold_idx == fold:
-                test_perts = set(chunk)
-                break
-
-        train_perts = set(p for p in pert_names if p not in test_perts)
+        train_perts = set(perts[train_idx])
+        test_perts = set(perts[test_idx])
 
         train_data = self._compute_condition_means(train_perts)
         test_data = self._compute_condition_means(test_perts)
 
         logger.info(
-            "K-fold CV: k=%d, fold=%d, seed=%d -> %d train, %d test perturbations",
+            "KFold CV: k=%d, fold=%d, seed=%d -> %d train, %d test perturbations",
             k, fold, seed, len(train_data), len(test_data),
         )
         return train_data, test_data
