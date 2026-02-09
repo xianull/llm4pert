@@ -181,7 +181,7 @@ class FacetKNNRetriever:
             weights = F.softmax(topk_sim, dim=1)  # (B, k)
 
             # Gather deltas for top-k neighbors: (B, k, G)
-            topk_deltas = self.train_delta_matrix[topk_idx]  # (B, k, G)
+            topk_deltas = self.train_delta_matrix[topk_idx.cpu()].to(device)  # (B, k, G)
 
             # Weighted average: (B, k, 1) * (B, k, G) -> sum -> (B, G)
             knn_delta = (weights.unsqueeze(-1) * topk_deltas).sum(dim=1)
