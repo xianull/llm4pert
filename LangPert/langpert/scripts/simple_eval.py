@@ -26,7 +26,7 @@ from langpert.prompts.loader import resolve_prompt_template
 
 # Eval dependencies (optional)
 try:
-    from perturbdict import PerturbDict
+    from langpert.perturb_dict import PerturbDict
     from langpert.scripts.eval_metrics import calculate_eval_metrics
 except ImportError as e:
     raise ImportError(

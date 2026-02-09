@@ -1,8 +1,8 @@
 # OpenAI backend configuration
-# Set OPENAI_API_KEY and OPENAI_BASE_URL environment variables before running
+# Set LLM_API_KEY environment variable before running
 
 name: openai
-model_name: openai_gpt5_mini
+model_name: gpt-4o
 temperature: 0.2
-api_key: ${oc.env:OPENAI_API_KEY}
-base_url: ${oc.env:OPENAI_BASE_URL}
+api_key: ${oc.env:LLM_API_KEY}
+base_url: https://yunwu.ai/v1

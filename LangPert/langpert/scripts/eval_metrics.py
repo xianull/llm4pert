@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from typing import Mapping
 
-from perturbdict import PerturbDict
+from langpert.perturb_dict import PerturbDict
 
 
 def safe_pearsonr(x: np.ndarray, y: np.ndarray) -> float:

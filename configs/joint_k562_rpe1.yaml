@@ -153,12 +153,13 @@ training:
   save_best: true
   early_stopping_patience: 12
   loss:
-    mse_weight: 2.0              # rebalanced for pearson loss
-    de_mse_weight: 3.0           # DE 基因聚焦
+    mse_weight: 2.0              # now on DELTA (pred-ctrl vs target-ctrl)
+    de_mse_weight: 3.0           # DE 基因聚焦 (also on delta)
     direction_weight: 0.1        # 方向 loss
     rank_weight: 0.3             # 排序 loss
-    pearson_weight: 3.0          # NEW: 直接优化目标指标
+    pearson_weight: 3.0          # 直接优化目标指标
     autofocus_gamma: 2.0         # error^4 聚焦 DE
+    gate_reg_weight: 0.5         # prevent gate collapse on DE genes
   pert_gene_dropout: 0.0
   cross_validation:
     enabled: false

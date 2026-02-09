@@ -211,7 +211,7 @@ class PerturbationDecoderV2(nn.Module):
       effect = MLP(impact_summary + cell_emb)          → (B, d_effect)
       factored_delta = effect @ gene_emb.T + gene_bias → (B, G)
       delta = impact_map * scale + factored_delta
-      gate = sigmoid(MLP(ctrl_expression))             → (B, G)
+      gate = sigmoid(MLP(impact_summary + cell_emb + effect))  → (B, G)
       pred = ctrl + gate * delta
     """
 
@@ -287,9 +287,11 @@ class PerturbationDecoderV2(nn.Module):
         # Learnable temperature for scaled dot-product
         self.logit_scale = nn.Parameter(torch.tensor(1.0 / (effect_dim ** 0.5)))
 
-        # Gate: ctrl expression → per-gene activation filter
+        # Gate: conditioned on perturbation info + cell state (NOT just ctrl)
+        # Input: impact_summary (what was perturbed) + cell_emb (which cell) + effect (predicted effect)
+        gate_input_dim = impact_summary_dim + embed_dim + effect_dim
         self.gate_net = build_mlp(
-            in_dim=num_genes,
+            in_dim=gate_input_dim,
             out_dim=num_genes,
             hidden_dims=gate_hidden_dims,
             activation="gelu",
@@ -328,10 +330,13 @@ class PerturbationDecoderV2(nn.Module):
         cell_emb: torch.Tensor,           # (B, D)
         ctrl_expression: torch.Tensor,    # (B, G)
         knn_delta: torch.Tensor = None,   # (B, G) optional kNN prior
-    ) -> torch.Tensor:
+    ) -> dict:
         """
         Returns:
-            pred_expression: (B, G) predicted post-perturbation expression.
+            dict with:
+                'pred_expression': (B, G) predicted post-perturbation expression
+                'delta': (B, G) predicted perturbation effect (before gating)
+                'gate': (B, G) per-gene gate values
         """
         # Residual path: direct scaling (gradient to cross-attn)
         scaled_impact = impact_map * self.impact_scale                    # (B, G)
@@ -369,8 +374,13 @@ class PerturbationDecoderV2(nn.Module):
         if knn_delta is not None:
             delta = knn_delta * self.knn_scale + delta
 
-        # Gate conditioned on baseline expression
-        gate = torch.sigmoid(self.gate_net(ctrl_expression))                # (B, G)
+        # Gate conditioned on perturbation info + cell state
+        gate_input = torch.cat([impact_summary, cell_emb, effect], dim=-1)  # (B, summary+D+effect)
+        gate = torch.sigmoid(self.gate_net(gate_input))                     # (B, G)
 
         pred_expression = ctrl_expression + gate * delta
-        return pred_expression
+        return {
+            "pred_expression": pred_expression,
+            "delta": delta,
+            "gate": gate,
+        }

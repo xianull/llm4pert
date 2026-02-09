@@ -432,11 +432,13 @@ class DyGenePT(nn.Module):
             )
 
         # Module 4: Decode prediction
-        pred_expression = self.decoder(
+        decoder_out = self.decoder(
             impact_map, cell_emb, ctrl_expression, knn_delta=knn_delta
-        )  # (B, G)
+        )  # dict with pred_expression, delta, gate
 
         return {
-            "pred_expression": pred_expression,
+            "pred_expression": decoder_out["pred_expression"],
             "attention_weights": facet_w,
+            "delta": decoder_out["delta"],
+            "gate": decoder_out["gate"],
         }

@@ -2,11 +2,11 @@
 # Example: python simple_eval.py backend=openai dataset.split_fold=1
 
 defaults:
-  - backend: unsloth
+  - backend: openai
   - _self_
 
 dataset:
-  data_path: /path/to/data/replogle_k562_essential/pert_dict.pkl
+  data_path: data/perturb_data/replogle_k562_essential
   split_k: 5
   split_fold: 0
   split_seed: 42

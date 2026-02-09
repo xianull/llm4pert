@@ -126,60 +126,55 @@ def compute_loss(
     de_idx: torch.LongTensor,   # (B, top_de)
     de_idx_len: torch.LongTensor,  # (B,)
     ctrl_expression: torch.Tensor,  # (B, G)
+    gate: torch.Tensor = None,     # (B, G) optional gate from decoder
     mse_weight: float = 1.0,
     de_mse_weight: float = 0.5,
     direction_weight: float = 0.1,
     rank_weight: float = 0.0,
     pearson_weight: float = 0.0,
     autofocus_gamma: float = 0.0,
+    gate_reg_weight: float = 0.0,
 ) -> dict:
-    """Combined loss with GEARS-style autofocus and direction components.
+    """Combined loss — delta-focused to prevent gate collapse.
 
-    Autofocus loss (GEARS, Roohani et al. 2023):
-        L_af = mean(|pred - target|^(2+gamma))
-        When gamma > 0, automatically upweights DE genes (large errors)
-        and downweights non-DE genes (small errors). No DE index needed.
+    Key change: global MSE is computed on DELTA (pred-ctrl vs target-ctrl),
+    not on absolute expression. This removes the 4980-gene incentive for gate→0.
 
-    Direction loss (applied to ALL genes, not just top-20):
-        L_dir = mean([sign(pred_delta) - sign(true_delta)]^2)
-        Penalizes wrong direction of change relative to control.
-
-    DE-focused MSE: additional MSE on known top DE genes (optional).
+    Gate regularization: penalizes gate < threshold on known DE genes,
+    preventing the gate from suppressing perturbation signals.
     """
     B, G = pred.shape
     device = pred.device
 
-    # --- Autofocus loss (GEARS-style) ---
+    # Delta vectors (the actual perturbation effects)
+    pred_delta = pred - ctrl_expression        # (B, G)
+    true_delta = target - ctrl_expression      # (B, G)
+
+    # --- Global MSE on DELTA (not absolute expression) ---
     if autofocus_gamma > 0:
-        # |error|^(2+gamma): automatically focuses on large-error (DE) genes
-        error = (pred - target).abs()
+        error = (pred_delta - true_delta).abs()
         loss_mse = (error ** (2 + autofocus_gamma)).mean()
     else:
-        # Standard MSE
-        loss_mse = nn.functional.mse_loss(pred, target)
+        loss_mse = nn.functional.mse_loss(pred_delta, true_delta)
 
     # --- Soft direction loss: tanh instead of sign (smooth, no dead zones) ---
     if direction_weight > 0:
-        pred_delta = pred - ctrl_expression
-        true_delta = target - ctrl_expression
-        # Soft sign via tanh: continuous & differentiable everywhere
-        k = 10.0  # temperature: higher = sharper (closer to sign), lower = smoother
+        k = 10.0
         pred_soft = torch.tanh(k * pred_delta)
         true_soft = torch.tanh(k * true_delta)
-        # Weighted by |true_delta|: DE genes dominate, noise genes ignored
         weights = true_delta.abs()
         loss_dir = ((pred_soft - true_soft) ** 2 * weights).sum() / weights.sum().clamp(min=1e-6)
     else:
         loss_dir = torch.tensor(0.0, device=device)
 
-    # --- DE-focused MSE (optional, on top-20 DE genes) ---
+    # --- DE-focused MSE on DELTA of top-20 DE genes ---
     if de_mse_weight > 0 and de_idx_len.sum() > 0:
         de_idx_clamped = de_idx.clamp(0, G - 1)
-        pred_de = pred.gather(1, de_idx_clamped)
-        target_de = target.gather(1, de_idx_clamped)
+        pred_de_delta = pred_delta.gather(1, de_idx_clamped)
+        true_de_delta = true_delta.gather(1, de_idx_clamped)
         mask = torch.arange(de_idx.shape[1], device=device).unsqueeze(0)
         mask = (mask < de_idx_len.unsqueeze(1)).float()
-        de_mse_raw = nn.functional.mse_loss(pred_de, target_de, reduction="none")
+        de_mse_raw = nn.functional.mse_loss(pred_de_delta, true_de_delta, reduction="none")
         loss_de_mse = (de_mse_raw * mask).sum() / mask.sum().clamp(min=1)
     else:
         loss_de_mse = torch.tensor(0.0, device=device)
@@ -201,16 +196,29 @@ def compute_loss(
     else:
         loss_pearson = torch.tensor(0.0, device=device)
 
+    # --- Gate regularization: penalize gate < threshold on DE genes ---
+    loss_gate_reg = torch.tensor(0.0, device=device)
+    if gate_reg_weight > 0 and gate is not None and de_idx_len.sum() > 0:
+        de_idx_clamped = de_idx.clamp(0, G - 1)
+        de_gate = gate.gather(1, de_idx_clamped)             # (B, top_de)
+        mask = torch.arange(de_idx.shape[1], device=device).unsqueeze(0)
+        mask = (mask < de_idx_len.unsqueeze(1)).float()
+        # Penalize gate < 0.3 on DE genes (hinge-style)
+        gate_violation = torch.clamp(0.3 - de_gate, min=0) ** 2
+        loss_gate_reg = (gate_violation * mask).sum() / mask.sum().clamp(min=1)
+
     total = (
         mse_weight * loss_mse
         + de_mse_weight * loss_de_mse
         + direction_weight * loss_dir
         + rank_weight * loss_rank
         + pearson_weight * loss_pearson
+        + gate_reg_weight * loss_gate_reg
     )
     return {
         "total": total, "mse": loss_mse, "de_mse": loss_de_mse,
         "direction": loss_dir, "rank": loss_rank, "pearson": loss_pearson,
+        "gate_reg": loss_gate_reg,
     }
 
 
@@ -785,12 +793,14 @@ def train(cfg):
                 de_idx=de_idx,
                 de_idx_len=de_idx_len,
                 ctrl_expression=ctrl_expression,
+                gate=output.get("gate", None),
                 mse_weight=cfg.training.loss.mse_weight,
                 de_mse_weight=cfg.training.loss.de_mse_weight,
                 direction_weight=cfg.training.loss.direction_weight,
                 rank_weight=float(getattr(cfg.training.loss, 'rank_weight', 0.0)),
                 pearson_weight=float(getattr(cfg.training.loss, 'pearson_weight', 0.0)),
                 autofocus_gamma=float(getattr(cfg.training.loss, 'autofocus_gamma', 0.0)),
+                gate_reg_weight=float(getattr(cfg.training.loss, 'gate_reg_weight', 0.0)),
             )
 
             # Backward
