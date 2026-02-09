@@ -417,7 +417,8 @@ class DyGenePT(nn.Module):
             self.cross_attention._genome_facets,
             confidence,
             q_pre_adapted=True,  # skip adapter for Q (already done above)
-        )  # (B, P, G), (K,)
+            cell_emb=cell_emb,   # cell-conditioned facet weights
+        )  # (B, P, G), (B, K)
 
         # Combine across perturbations: sum valid slots
         pert_mask = (pert_gene_indices >= 0).float()                # (B, P)

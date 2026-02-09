@@ -326,3 +326,144 @@ def format_comparison_table(
 
     lines.append("=" * 70)
     return "\n".join(lines)
+
+
+def collect_facet_weight_stats(
+    model,
+    dataset,
+    device: torch.device,
+    cfg,
+    collate_fn,
+) -> Dict[str, float]:
+    """Collect per-cell facet weight statistics to verify cell-conditioned weighting.
+
+    Returns dict with per-facet mean/std and inter-cell/inter-facet variance.
+    Only meaningful when SemanticCrossAttention uses cell-conditioned weights
+    (returns (B, K) instead of (K,)).
+    """
+    model.eval()
+    loader = DataLoader(
+        dataset, batch_size=256, shuffle=False, num_workers=0,
+        collate_fn=collate_fn, pin_memory=True,
+    )
+    all_weights = []
+    use_amp = device.type == "cuda"
+
+    with torch.no_grad():
+        for batch in loader:
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                output = model(
+                    gene_ids=batch["gene_ids"].to(device, non_blocking=True),
+                    values=batch["values"].to(device, non_blocking=True),
+                    padding_mask=batch["padding_mask"].to(device, non_blocking=True),
+                    pert_gene_indices=batch["pert_gene_indices"].to(device, non_blocking=True),
+                    ctrl_expression=batch["ctrl_expression"].to(device, non_blocking=True),
+                )
+            fw = output["attention_weights"]
+            if fw.dim() == 1:
+                continue  # static weights, skip
+            all_weights.append(fw.float().cpu())
+
+    if not all_weights:
+        return {}
+
+    W = torch.cat(all_weights, dim=0)  # (N_cells, K)
+    facet_names_cfg = getattr(cfg.facets, 'names', None)
+    facet_names = list(facet_names_cfg) if facet_names_cfg else [
+        f"facet_{i}" for i in range(W.size(1))
+    ]
+
+    stats = {}
+    for k in range(W.size(1)):
+        name = facet_names[k] if k < len(facet_names) else f"facet_{k}"
+        stats[f"facet_w/{name}/mean"] = W[:, k].mean().item()
+        stats[f"facet_w/{name}/std"] = W[:, k].std().item()
+
+    # Inter-cell variance: mean of per-facet variance across cells
+    stats["facet_w/inter_cell_variance"] = W.var(dim=0).mean().item()
+    # Inter-facet variance: mean of per-cell variance across facets
+    stats["facet_w/inter_facet_variance"] = W.var(dim=1).mean().item()
+
+    model.train()
+    return stats
+
+
+def visualize_facet_weights(
+    model,
+    dataset,
+    device: torch.device,
+    cfg,
+    collate_fn,
+    output_dir: str,
+) -> Optional[str]:
+    """Generate facet weight distribution visualization and save as PNG.
+
+    Left: boxplot of per-facet weight distributions across cells.
+    Right: heatmap of facet weights for 100 sampled cells.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    model.eval()
+    loader = DataLoader(
+        dataset, batch_size=256, shuffle=False, num_workers=0,
+        collate_fn=collate_fn, pin_memory=True,
+    )
+    all_weights = []
+    use_amp = device.type == "cuda"
+
+    with torch.no_grad():
+        for batch in loader:
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                output = model(
+                    gene_ids=batch["gene_ids"].to(device, non_blocking=True),
+                    values=batch["values"].to(device, non_blocking=True),
+                    padding_mask=batch["padding_mask"].to(device, non_blocking=True),
+                    pert_gene_indices=batch["pert_gene_indices"].to(device, non_blocking=True),
+                    ctrl_expression=batch["ctrl_expression"].to(device, non_blocking=True),
+                )
+            fw = output["attention_weights"]
+            if fw.dim() > 1:
+                all_weights.append(fw.float().cpu())
+
+    if not all_weights:
+        model.train()
+        return None
+
+    W = torch.cat(all_weights, dim=0).numpy()  # (N, K)
+    K = W.shape[1]
+    facet_names_cfg = getattr(cfg.facets, 'names', None)
+    facet_names = list(facet_names_cfg) if facet_names_cfg else [
+        f"F{i}" for i in range(K)
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # Left: boxplot of per-facet weight distributions
+    axes[0].boxplot(
+        [W[:, k] for k in range(K)],
+        labels=[fn[:20] for fn in facet_names[:K]],
+    )
+    axes[0].set_ylabel("Weight")
+    axes[0].set_title("Per-cell Facet Weight Distribution")
+    axes[0].tick_params(axis='x', rotation=45)
+
+    # Right: heatmap of 100 sampled cells
+    sample_idx = np.random.choice(W.shape[0], min(100, W.shape[0]), replace=False)
+    sample_idx = np.sort(sample_idx)
+    im = axes[1].imshow(W[sample_idx], aspect='auto', cmap='YlOrRd')
+    axes[1].set_xlabel("Facet")
+    axes[1].set_ylabel("Cell (sampled)")
+    axes[1].set_xticks(range(K))
+    axes[1].set_xticklabels([fn[:20] for fn in facet_names[:K]], rotation=45)
+    axes[1].set_title(f"Facet Weights Heatmap ({min(100, W.shape[0])} cells)")
+    plt.colorbar(im, ax=axes[1])
+
+    plt.tight_layout()
+    save_path = f"{output_dir}/facet_weight_analysis.png"
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    model.train()
+    return save_path

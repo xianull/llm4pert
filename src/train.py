@@ -26,7 +26,7 @@ from src.utils import set_seed, get_device, setup_logging
 from src.model.dygenept import DyGenePT
 from src.data.dataset import PerturbationDataset
 from src.data.collator import collate_perturbation_batch
-from src.evaluate import evaluate_model, format_comparison_table, format_subgroup_table
+from src.evaluate import evaluate_model, format_comparison_table, format_subgroup_table, collect_facet_weight_stats, visualize_facet_weights
 from src.model.knn_retrieval import FacetKNNRetriever
 
 
@@ -914,7 +914,24 @@ def train(cfg):
                     import wandb
                     wandb.log({f"val/{k}": v for k, v in val_metrics.items()})
 
-                # Save best model (select by pearson_delta_all, higher is better)
+                # Collect facet weight statistics (cell-conditioned weights)
+                try:
+                    val_ds_for_stats = val_dataset
+                    if val_datasets is not None:
+                        val_ds_for_stats = next(iter(val_datasets.values()))
+                    fw_stats = collect_facet_weight_stats(
+                        raw_model, val_ds_for_stats, device, cfg, collate_perturbation_batch,
+                    )
+                    if fw_stats:
+                        logger.info(
+                            f"Facet weights: inter_cell_var={fw_stats.get('facet_w/inter_cell_variance', 0):.6f}, "
+                            f"inter_facet_var={fw_stats.get('facet_w/inter_facet_variance', 0):.6f}"
+                        )
+                        if use_wandb:
+                            import wandb
+                            wandb.log(fw_stats)
+                except Exception as e:
+                    logger.warning(f"Facet weight stats collection failed: {e}")
                 val_score = val_metrics["pearson_delta_top20"]
                 if val_score > best_val_score:
                     best_val_score = val_score
@@ -1035,6 +1052,20 @@ def train(cfg):
             import wandb
             wandb.log({f"test/{k}": v for k, v in test_metrics.items()})
             wandb.finish()
+
+        # Facet weight visualization on test set
+        try:
+            test_ds_for_vis = test_dataset
+            if test_datasets is not None:
+                test_ds_for_vis = next(iter(test_datasets.values()))
+            vis_path = visualize_facet_weights(
+                raw_model, test_ds_for_vis, device, cfg,
+                collate_perturbation_batch, str(output_dir),
+            )
+            if vis_path:
+                logger.info(f"Facet weight visualization saved to {vis_path}")
+        except Exception as e:
+            logger.warning(f"Facet weight visualization failed: {e}")
 
         # Save test metrics
         import json

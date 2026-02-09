@@ -166,10 +166,9 @@ class SemanticCrossAttention(nn.Module):
         self.W_Q = nn.Linear(embed_dim, embed_dim)
         self.W_K = nn.Linear(embed_dim, embed_dim)
 
-        # Learnable facet channel weights (which facets matter more)
-        self.facet_weights = nn.Parameter(
-            torch.ones(num_facets) / num_facets
-        )
+        # Cell-conditioned facet channel weights: cell_emb → (B, K)
+        # Different cells get different facet importance (e.g. K562 vs RPE1)
+        self.facet_weight_net = nn.Linear(embed_dim, num_facets)
 
         self.scale = embed_dim ** -0.5
         self.dropout = nn.Dropout(dropout)
@@ -186,6 +185,7 @@ class SemanticCrossAttention(nn.Module):
         genome_facets: torch.Tensor,         # (G, K, facet_dim)  frozen buffer
         confidence: torch.Tensor = None,     # (B, P, K)  optional
         q_pre_adapted: bool = False,         # True if Q already went through adapter
+        cell_emb: torch.Tensor = None,       # (B, D) cell embedding for conditioned weights
     ) -> tuple:
         """
         Args:
@@ -193,10 +193,13 @@ class SemanticCrossAttention(nn.Module):
             genome_facets:  Static facet embeddings for ALL genes (frozen).
             confidence:     KG imputation confidence for pert gene facets.
             q_pre_adapted:  If True, skip adapter for Q (already applied externally).
+            cell_emb:       Cell embedding for cell-conditioned facet weights.
+                           When provided, facet weights are (B, K) per-cell.
 
         Returns:
             impact_scores:  (B, P, G) per-gene impact from each perturbation.
-            facet_weights:  (K,) normalized facet channel weights.
+            facet_weights:  (B, K) per-cell normalized facet weights if cell_emb provided,
+                           otherwise (K,) uniform weights.
         """
         # Adapt: facet_dim → embed_dim (nonlinear projection)
         if q_pre_adapted:
@@ -214,9 +217,13 @@ class SemanticCrossAttention(nn.Module):
             conf_bias = torch.log(confidence.clamp(min=1e-6))  # (B, P, K)
             sim = sim + conf_bias.unsqueeze(-1)  # (B, P, K, 1) broadcast over G
 
-        # Learned facet combination: weighted sum over K channels
-        w = torch.softmax(self.facet_weights, dim=0)  # (K,)
-        impact = torch.einsum('bpkg,k->bpg', sim, w)  # (B, P, G)
+        # Cell-conditioned facet combination: per-cell weights over K channels
+        if cell_emb is not None:
+            w = torch.softmax(self.facet_weight_net(cell_emb), dim=-1)  # (B, K)
+            impact = torch.einsum('bpkg,bk->bpg', sim, w)               # (B, P, G)
+        else:
+            w = torch.ones(sim.size(2), device=sim.device) / sim.size(2)  # (K,)
+            impact = torch.einsum('bpkg,k->bpg', sim, w)                  # (B, P, G)
 
         # Top-k sparsification with straight-through gradient
         if self.topk > 0 and self.topk < impact.size(-1):
