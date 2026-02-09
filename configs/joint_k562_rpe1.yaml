@@ -153,13 +153,13 @@ training:
   save_best: true
   early_stopping_patience: 12
   loss:
-    mse_weight: 2.0              # now on DELTA (pred-ctrl vs target-ctrl)
-    de_mse_weight: 3.0           # DE 基因聚焦 (also on delta)
-    direction_weight: 0.1        # 方向 loss
+    mse_weight: 0.5              # reduced: 5000-gene MSE was diluting DE gradients
+    de_mse_weight: 3.0           # DE 基因聚焦 (on delta)
+    direction_weight: 0.05       # reduced: was contributing gradient noise
     rank_weight: 0.3             # 排序 loss
-    pearson_weight: 3.0          # 直接优化目标指标
-    autofocus_gamma: 2.0         # error^4 聚焦 DE
-    gate_reg_weight: 0.5         # prevent gate collapse on DE genes
+    pearson_weight: 5.0          # raised: directly optimizes target metric
+    autofocus_gamma: 0.0         # disabled: error^4 caused outlier-dominated gradients
+    gate_reg_weight: 0.8         # raised: stronger push for DE gene gates → 1.0
   pert_gene_dropout: 0.0
   cross_validation:
     enabled: false

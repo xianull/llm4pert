@@ -23,6 +23,7 @@ eval:
   output_dir: outputs/eval
   # Performance settings
   batch_size: null  # Set to integer (e.g., 4, 8) to enable batch inference, null for sequential
+  num_workers: 32  # Number of concurrent threads for API calls
   # Weights & Biases tracking
   use_wandb: false  # Set to true to enable wandb logging
   wandb_project: null  # Set to your wandb project name

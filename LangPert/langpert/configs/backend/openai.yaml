@@ -2,7 +2,7 @@
 # Set LLM_API_KEY environment variable before running
 
 name: openai
-model_name: gpt-4o
+model_name: claude-3-5-sonnet-20241022
 temperature: 0.2
 api_key: ${oc.env:LLM_API_KEY}
 base_url: https://yunwu.ai/v1

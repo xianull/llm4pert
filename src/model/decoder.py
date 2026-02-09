@@ -287,6 +287,21 @@ class PerturbationDecoderV2(nn.Module):
         # Learnable temperature for scaled dot-product
         self.logit_scale = nn.Parameter(torch.tensor(1.0 / (effect_dim ** 0.5)))
 
+        # Multi-head factored output: increases expressiveness of effect @ gene_emb.T
+        self.num_effect_heads = 4
+        head_dim = effect_dim // self.num_effect_heads
+        self.head_projectors = nn.ModuleList([
+            nn.Linear(effect_dim, head_dim, bias=False)
+            for _ in range(self.num_effect_heads)
+        ])
+        self.head_gene_projectors = nn.ModuleList([
+            nn.Linear(gene_facet_tensor.shape[-1] if gene_facet_tensor is not None else effect_dim,
+                       head_dim, bias=False)
+            for _ in range(self.num_effect_heads)
+        ]) if self._has_gene_emb else None
+        self.head_merge = nn.Linear(self.num_effect_heads, 1, bias=False)
+        nn.init.ones_(self.head_merge.weight)  # start as uniform average
+
         # Gate: conditioned on perturbation info + cell state (NOT just ctrl)
         # Input: impact_summary (what was perturbed) + cell_emb (which cell) + effect (predicted effect)
         gate_input_dim = impact_summary_dim + embed_dim + effect_dim
@@ -298,6 +313,10 @@ class PerturbationDecoderV2(nn.Module):
             dropout=dropout,
             final_activation=False,
         )
+
+        # Local gate: per-gene signal from impact_map (breaks info bottleneck)
+        # Allows gate to know which specific genes are directly affected
+        self.local_gate_scale = nn.Parameter(torch.ones(1) * 0.5)
 
         # Cross-gene MLP (GEARS-inspired): captures inter-gene dependencies
         self.cross_gene_mlp = nn.Sequential(
@@ -322,7 +341,8 @@ class PerturbationDecoderV2(nn.Module):
         )
 
         # kNN prior: learnable per-gene scale for kNN delta
-        self.knn_scale = nn.Parameter(torch.ones(num_genes) * 0.5)
+        # Init 0.8 (was 0.5): kNN is a strong prior, model should learn residual
+        self.knn_scale = nn.Parameter(torch.ones(num_genes) * 0.8)
 
     def forward(
         self,
@@ -348,15 +368,24 @@ class PerturbationDecoderV2(nn.Module):
         effect_input = torch.cat([impact_summary, cell_emb], dim=-1)       # (B, summary+D)
         effect = self.effect_net(effect_input)                              # (B, effect_dim)
 
-        # Factored gene-level prediction: effect @ gene_emb.T
+        # Factored gene-level prediction: multi-head effect @ gene_emb.T
         if self._has_gene_emb:
             gene_emb = self.gene_embed_proj(self._gene_mean)               # (G, effect_dim)
-            # Gene embeddings normalized for stable directions;
-            # effect keeps magnitude to encode perturbation strength
             gene_emb_norm = nn.functional.normalize(gene_emb, dim=-1)      # (G, effect_dim)
-            # Hybrid: semantic factored (gene_emb) + per-gene learnable
-            factored = effect @ gene_emb_norm.t()                           # (B, G) magnitude-aware
-            per_gene = (effect.unsqueeze(1) * self.per_gene_weight.unsqueeze(0)).sum(-1)  # (B, G) free
+
+            # Multi-head: each head captures different aspects of gene response
+            head_outputs = []
+            for i in range(self.num_effect_heads):
+                eff_h = self.head_projectors[i](effect)                     # (B, head_dim)
+                gem_h = self.head_gene_projectors[i](self._gene_mean)       # (G, head_dim)
+                gem_h = nn.functional.normalize(gem_h, dim=-1)
+                head_outputs.append(eff_h @ gem_h.t())                      # (B, G)
+            # Stack and merge: (B, G, num_heads) -> (B, G)
+            head_stack = torch.stack(head_outputs, dim=-1)                  # (B, G, num_heads)
+            factored = self.head_merge(head_stack).squeeze(-1)              # (B, G)
+
+            # Per-gene learnable correction (unchanged)
+            per_gene = (effect.unsqueeze(1) * self.per_gene_weight.unsqueeze(0)).sum(-1)  # (B, G)
             factored_delta = self.logit_scale * (factored + per_gene) + self.gene_bias
         else:
             factored_delta = self.direct_output(effect)                     # (B, G)
@@ -374,9 +403,12 @@ class PerturbationDecoderV2(nn.Module):
         if knn_delta is not None:
             delta = knn_delta * self.knn_scale + delta
 
-        # Gate conditioned on perturbation info + cell state
+        # Gate conditioned on perturbation info + cell state + LOCAL gene-level signal
         gate_input = torch.cat([impact_summary, cell_emb, effect], dim=-1)  # (B, summary+D+effect)
-        gate = torch.sigmoid(self.gate_net(gate_input))                     # (B, G)
+        global_gate = self.gate_net(gate_input)                             # (B, G)
+        # Local gate: impact_map provides per-gene info (which genes are directly affected)
+        local_gate = self.local_gate_scale * impact_map                     # (B, G)
+        gate = torch.sigmoid(global_gate + local_gate)                      # (B, G)
 
         pred_expression = ctrl_expression + gate * delta
         return {

@@ -59,64 +59,85 @@ def is_main_process(rank: int) -> bool:
 # =====================================================================
 # Loss function
 # =====================================================================
+def _pearson_on_subset(pred_sub, true_sub, mask=None):
+    """Compute 1 - mean Pearson(r) on a subset of genes. Helper function.
+
+    Args:
+        pred_sub: (B, K) predicted delta for K genes
+        true_sub: (B, K) true delta for K genes
+        mask: (B, K) float mask, or None for all-valid
+    Returns:
+        scalar loss = 1 - mean(r)
+    """
+    if mask is None:
+        mask = torch.ones_like(pred_sub)
+
+    valid_counts = mask.sum(dim=1)
+    valid_samples = valid_counts >= 2
+
+    if valid_samples.sum() == 0:
+        return torch.tensor(0.0, device=pred_sub.device)
+
+    pred_masked = pred_sub * mask
+    true_masked = true_sub * mask
+
+    n = valid_counts.clamp(min=1)
+    pred_mean = pred_masked.sum(dim=1) / n
+    true_mean = true_masked.sum(dim=1) / n
+
+    pred_centered = (pred_sub - pred_mean.unsqueeze(1)) * mask
+    true_centered = (true_sub - true_mean.unsqueeze(1)) * mask
+
+    cov = (pred_centered * true_centered).sum(dim=1)
+    pred_std = (pred_centered ** 2).sum(dim=1).clamp(min=1e-8).sqrt()
+    true_std = (true_centered ** 2).sum(dim=1).clamp(min=1e-8).sqrt()
+
+    r = cov / (pred_std * true_std + 1e-8)
+    return 1.0 - r[valid_samples].mean()
+
+
 def _differentiable_pearson_loss(
     pred: torch.Tensor,           # (B, G)
     target: torch.Tensor,         # (B, G)
     ctrl: torch.Tensor,           # (B, G)
     de_idx: torch.LongTensor,    # (B, top_de)
     de_idx_len: torch.LongTensor, # (B,)
+    global_gene_sample: int = 200,  # sample genes for all-gene Pearson
+    global_weight: float = 0.3,     # weight of all-gene Pearson vs DE-only
 ) -> torch.Tensor:
-    """Differentiable 1 - Pearson correlation on top-DE delta genes.
+    """Differentiable Pearson loss: DE-focused + sampled all-gene component.
 
-    Computes per-sample Pearson correlation between predicted and true
-    delta vectors restricted to the known top-DE gene indices, then
-    returns 1 - mean(r) as a loss (lower is better).
+    Combines:
+      (1-w) * Pearson_loss(top-DE genes)  +  w * Pearson_loss(sampled all genes)
+
+    The all-gene component helps the model learn global delta ranking,
+    not just the top-20 DE genes.
     """
     B, G = pred.shape
     device = pred.device
 
-    de_idx_clamped = de_idx.clamp(0, G - 1)
-
     pred_delta = pred - ctrl
     true_delta = target - ctrl
 
-    # Gather DE gene deltas: (B, top_de)
+    # --- DE-focused Pearson ---
+    de_idx_clamped = de_idx.clamp(0, G - 1)
     pred_de = pred_delta.gather(1, de_idx_clamped)
     true_de = true_delta.gather(1, de_idx_clamped)
-
-    # Build mask for valid DE positions
     mask = torch.arange(de_idx.shape[1], device=device).unsqueeze(0)
-    mask = (mask < de_idx_len.unsqueeze(1)).float()  # (B, top_de)
+    mask = (mask < de_idx_len.unsqueeze(1)).float()
 
-    # Skip samples with fewer than 2 valid DE genes
-    valid_counts = mask.sum(dim=1)  # (B,)
-    valid_samples = valid_counts >= 2  # (B,)
+    loss_de = _pearson_on_subset(pred_de, true_de, mask)
 
-    if valid_samples.sum() == 0:
-        return torch.tensor(0.0, device=device)
+    # --- Sampled all-gene Pearson (captures global ranking ability) ---
+    if global_gene_sample > 0 and G > global_gene_sample:
+        sample_idx = torch.randint(0, G, (B, global_gene_sample), device=device)
+        pred_sampled = pred_delta.gather(1, sample_idx)
+        true_sampled = true_delta.gather(1, sample_idx)
+        loss_global = _pearson_on_subset(pred_sampled, true_sampled)
+    else:
+        loss_global = _pearson_on_subset(pred_delta, true_delta)
 
-    # Masked mean for each sample
-    pred_masked = pred_de * mask
-    true_masked = true_de * mask
-
-    n = valid_counts.clamp(min=1)  # (B,)
-    pred_mean = pred_masked.sum(dim=1) / n  # (B,)
-    true_mean = true_masked.sum(dim=1) / n  # (B,)
-
-    # Center
-    pred_centered = (pred_de - pred_mean.unsqueeze(1)) * mask  # (B, top_de)
-    true_centered = (true_de - true_mean.unsqueeze(1)) * mask  # (B, top_de)
-
-    # Covariance and standard deviations
-    cov = (pred_centered * true_centered).sum(dim=1)  # (B,)
-    pred_std = (pred_centered ** 2).sum(dim=1).clamp(min=1e-8).sqrt()  # (B,)
-    true_std = (true_centered ** 2).sum(dim=1).clamp(min=1e-8).sqrt()  # (B,)
-
-    # Pearson r per sample
-    r = cov / (pred_std * true_std + 1e-8)  # (B,)
-
-    # Loss = 1 - mean(r) over valid samples only
-    loss = 1.0 - r[valid_samples].mean()
+    loss = (1.0 - global_weight) * loss_de + global_weight * loss_global
     return loss
 
 
@@ -196,16 +217,18 @@ def compute_loss(
     else:
         loss_pearson = torch.tensor(0.0, device=device)
 
-    # --- Gate regularization: penalize gate < threshold on DE genes ---
+    # --- Gate regularization: hinge + soft target on DE genes ---
     loss_gate_reg = torch.tensor(0.0, device=device)
     if gate_reg_weight > 0 and gate is not None and de_idx_len.sum() > 0:
         de_idx_clamped = de_idx.clamp(0, G - 1)
         de_gate = gate.gather(1, de_idx_clamped)             # (B, top_de)
         mask = torch.arange(de_idx.shape[1], device=device).unsqueeze(0)
         mask = (mask < de_idx_len.unsqueeze(1)).float()
-        # Penalize gate < 0.3 on DE genes (hinge-style)
-        gate_violation = torch.clamp(0.3 - de_gate, min=0) ** 2
-        loss_gate_reg = (gate_violation * mask).sum() / mask.sum().clamp(min=1)
+        # Hinge: penalize gate < 0.6 on DE genes (raised from 0.3)
+        gate_violation = torch.clamp(0.6 - de_gate, min=0) ** 2
+        # Soft target: encourage gate → 1.0 on DE genes
+        soft_target = (1.0 - de_gate) ** 2
+        loss_gate_reg = ((gate_violation + 0.3 * soft_target) * mask).sum() / mask.sum().clamp(min=1)
 
     total = (
         mse_weight * loss_mse

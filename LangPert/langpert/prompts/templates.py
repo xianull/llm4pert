@@ -81,11 +81,20 @@ Example response format:
 DO NOT provide multiple JSON objects or alternative analyses. Provide ONLY ONE response.
 '''
 
+# Paper prompt (Appendix A.1) — exact prompt from LangPert MLGenX 2025 paper
+PAPER_PROMPT = r'''Given a gene of interest {gene}, choose around {k_range} genes from the list that are most similar to gene {gene} based on shared involvement in specific biological pathways, co-regulation, or protein-protein interactions. These genes should be relevant for perturbation prediction, meaning their knockout effect is likely to result in similar changes in gene expression as the knockout of gene {gene}. Rank the genes in order of decreasing similarity, with the most similar gene first. Consider data from relevant databases or literature to assess the similarity between genes.
+Focus on the context of the K562 cell line, a model for chronic myeloid leukemia. Consider the role of genes in pathways relevant to cancer biology, including, but not limited to, ribosome biogenesis, transcriptional regulation, mitochondrial function, and stress responses.
+Here is the list of genes available to choose from: {list_of_genes}
+Provide your response as LIST:
+Note: You may choose NO genes if NOT CONFIDENT in the similarity of others. Equally, when there are many genes involved in the same pathway, feel free to include more relevant genes in the list.
+OUTPUT JSON FORMAT'''
+
 
 # Template registry
 PROMPT_TEMPLATES = {
     "default": DEFAULT_PROMPT,
     "minimal": MINIMAL_PROMPT,
     "no_reasoning": NO_REASONING_PROMPT,
-    "k562": K562_PROMPT
+    "k562": K562_PROMPT,
+    "paper": PAPER_PROMPT,
 }

@@ -5,7 +5,9 @@ Supports OpenAI, Azure OpenAI, and any OpenAI-compatible APIs.
 """
 
 import time
-from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Optional
+
 from openai import OpenAI
 
 from .base import BaseBackend
@@ -30,28 +32,18 @@ class OpenAIBackend(BaseBackend):
         self.model = model
         self.temperature = temperature
 
-    def generate_text(self, prompt: str, system_prompt: Optional[str] = None,
-                     temperature: Optional[float] = None, verbose: bool = False, **kwargs) -> str:
-        """Generate text using OpenAI-compatible API.
-
-        Args:
-            prompt: User prompt
-            system_prompt: Optional system prompt
-            temperature: Override default temperature
-            verbose: If True, print the formatted messages for debugging
-            **kwargs: Additional parameters
-
-        Returns:
-            Generated text response
-        """
+    def _build_messages(self, prompt: str, system_prompt: Optional[str] = None):
         messages = []
-
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-
         messages.append({"role": "user", "content": prompt})
+        return messages
 
-        # Print formatted messages if verbose mode is enabled
+    def generate_text(self, prompt: str, system_prompt: Optional[str] = None,
+                     temperature: Optional[float] = None, verbose: bool = False, **kwargs) -> str:
+        """Generate text using OpenAI-compatible API."""
+        messages = self._build_messages(prompt, system_prompt)
+
         if verbose:
             print(f"\nFinal Formatted Messages (OpenAI API):")
             print(f"{'-'*40}")
@@ -60,7 +52,6 @@ class OpenAIBackend(BaseBackend):
                 print(f"{'-'*20}")
             print(f"{'-'*40}")
 
-        # Remove verbose from kwargs as a safety measure (it's already an explicit parameter)
         kwargs.pop('verbose', None)
 
         completion = self.client.chat.completions.create(
@@ -70,7 +61,28 @@ class OpenAIBackend(BaseBackend):
             **kwargs
         )
 
-        # Rate limiting (from original code)
-        time.sleep(1)
-
         return completion.choices[0].message.content
+
+    def generate_batch(self, prompts: List[str], max_workers: int = 32, **kwargs) -> List[str]:
+        """Generate text for multiple prompts concurrently using threads.
+
+        Args:
+            prompts: List of prompts.
+            max_workers: Number of concurrent threads (default 32).
+            **kwargs: Passed to generate_text.
+
+        Returns:
+            List of responses in the same order as prompts.
+        """
+        results = [None] * len(prompts)
+
+        def _call(idx, prompt):
+            return idx, self.generate_text(prompt, **kwargs)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_call, i, p): i for i, p in enumerate(prompts)}
+            for future in as_completed(futures):
+                idx, response = future.result()
+                results[idx] = response
+
+        return results

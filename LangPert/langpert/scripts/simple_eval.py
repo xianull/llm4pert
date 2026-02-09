@@ -14,6 +14,7 @@ Usage:
   python -m langpert.scripts.simple_eval eval.save_metrics=true eval.output_dir=my_results
 """
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -80,7 +81,7 @@ class EvalConfig:
     output_dir: str = "outputs/eval"
     # Performance settings
     batch_size: Optional[int] = 4  # Set to enable batch inference (e.g., 4, 8, 16)
-    num_workers: int = 1  # For future use
+    num_workers: int = 32  # Number of concurrent threads for API calls
     # Weights & Biases tracking
     use_wandb: bool = False
     wandb_project: Optional[str] = "langpert-eval"
@@ -181,21 +182,43 @@ def run_evaluation(cfg: Config):
     )
 
     # ─── Run Predictions ───
-    logger.info("Predicting %d perturbations...", len(test_data))
-    
-    # Use batch inference if batch_size is specified
-    if cfg.eval.batch_size and cfg.eval.batch_size > 1:
-        logger.info("Using batch inference with batch_size=%d", cfg.eval.batch_size)
-        batch_results = model.predict_batch(
-            list(test_data.keys()),
-            k_range=cfg.eval.k_range,
-            batch_size=cfg.eval.batch_size,
-        )
-        predictions = {gene: result.prediction for gene, result in batch_results.items()}
+    num_workers = cfg.eval.num_workers
+    logger.info("Predicting %d perturbations with %d workers...", len(test_data), num_workers)
+
+    test_genes = list(test_data.keys())
+
+    if num_workers > 1:
+        # Concurrent prediction using thread pool
+        predictions = {}
+        errors = []
+
+        def _predict_one(gene):
+            result = model.predict_perturbation(
+                gene,
+                k_range=cfg.eval.k_range,
+                verbose=False,
+            )
+            return gene, result.prediction
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(_predict_one, g): g for g in test_genes}
+            with tqdm(total=len(test_genes), desc="Predicting") as pbar:
+                for future in as_completed(futures):
+                    gene = futures[future]
+                    try:
+                        gene, pred = future.result()
+                        predictions[gene] = pred
+                    except Exception as e:
+                        logger.error("Error predicting %s: %s", gene, e)
+                        errors.append(gene)
+                    pbar.update(1)
+
+        if errors:
+            logger.warning("Failed to predict %d genes: %s", len(errors), errors)
     else:
         # Sequential processing
         predictions = {}
-        for pert_name in tqdm(test_data.keys(), desc="Predicting"):
+        for pert_name in tqdm(test_genes, desc="Predicting"):
             result = model.predict_perturbation(
                 pert_name,
                 k_range=cfg.eval.k_range,
