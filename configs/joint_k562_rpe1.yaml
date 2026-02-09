@@ -194,6 +194,14 @@ evaluation:
     - "direction_accuracy"
 
 # ========================
+# kNN Retrieval (LangPert-inspired facet-based kNN prior)
+# ========================
+knn:
+  enabled: true
+  k: 10
+  similarity: "cosine"
+
+# ========================
 # KG Enrichment
 # ========================
 kg_enrichment:

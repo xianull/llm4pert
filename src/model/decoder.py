@@ -319,11 +319,15 @@ class PerturbationDecoderV2(nn.Module):
             f"trainable={trainable:,}"
         )
 
+        # kNN prior: learnable per-gene scale for kNN delta
+        self.knn_scale = nn.Parameter(torch.ones(num_genes) * 0.5)
+
     def forward(
         self,
         impact_map: torch.Tensor,        # (B, G)
         cell_emb: torch.Tensor,           # (B, D)
         ctrl_expression: torch.Tensor,    # (B, G)
+        knn_delta: torch.Tensor = None,   # (B, G) optional kNN prior
     ) -> torch.Tensor:
         """
         Returns:
@@ -360,6 +364,10 @@ class PerturbationDecoderV2(nn.Module):
         h_cross = self.cross_gene_mlp(delta.detach() if not self.training else delta)  # (B, cross_dim)
         cross_correction = self.cross_gene_decoder(h_cross)                 # (B, G)
         delta = delta + cross_correction
+
+        # kNN prior: add pre-computed kNN average delta as strong prior
+        if knn_delta is not None:
+            delta = knn_delta * self.knn_scale + delta
 
         # Gate conditioned on baseline expression
         gate = torch.sigmoid(self.gate_net(ctrl_expression))                # (B, G)

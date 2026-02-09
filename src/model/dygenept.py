@@ -423,9 +423,16 @@ class DyGenePT(nn.Module):
         pert_mask = (pert_gene_indices >= 0).float()                # (B, P)
         impact_map = (impact_scores * pert_mask.unsqueeze(-1)).sum(dim=1)  # (B, G)
 
+        # kNN retrieval: get prior delta from similar training genes
+        knn_delta = None
+        if hasattr(self, 'knn_retriever') and self.knn_retriever is not None:
+            knn_delta = self.knn_retriever.retrieve(
+                pert_gene_indices, device=ctrl_expression.device
+            )
+
         # Module 4: Decode prediction
         pred_expression = self.decoder(
-            impact_map, cell_emb, ctrl_expression
+            impact_map, cell_emb, ctrl_expression, knn_delta=knn_delta
         )  # (B, G)
 
         return {

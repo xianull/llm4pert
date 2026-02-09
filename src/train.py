@@ -27,6 +27,7 @@ from src.model.dygenept import DyGenePT
 from src.data.dataset import PerturbationDataset
 from src.data.collator import collate_perturbation_batch
 from src.evaluate import evaluate_model, format_comparison_table, format_subgroup_table
+from src.model.knn_retrieval import FacetKNNRetriever
 
 
 # =====================================================================
@@ -640,6 +641,34 @@ def train(cfg):
         print(f"Done! Train samples: {len(train_dataset)}")
 
     # ------------------------------------------------------------------
+    # 4.5 Build kNN retriever (Facet-based nearest neighbor prior)
+    # ------------------------------------------------------------------
+    knn_cfg = getattr(cfg, 'knn', None)
+    knn_enabled = knn_cfg is not None and getattr(knn_cfg, 'enabled', False)
+
+    if knn_enabled:
+        knn_k = int(getattr(knn_cfg, 'k', 10))
+        if is_main_process(rank):
+            logger.info(f"Building FacetKNN index (k={knn_k})...")
+
+        facet_tensor = raw_model.gene_encoder.facet_tensor  # (G_vocab, K, D)
+        knn_retriever = FacetKNNRetriever(
+            gene_facet_tensor=facet_tensor,
+            gene_names=gene_names,
+            gene_to_facet_idx=gene_to_facet_idx,
+            k=knn_k,
+        )
+
+        # Build training index from training dataset (ConcatDataset for multi-dataset)
+        knn_retriever.build_training_index(train_dataset)
+
+        raw_model.knn_retriever = knn_retriever
+        if is_main_process(rank):
+            logger.info("FacetKNN index built and attached to model.")
+    else:
+        raw_model.knn_retriever = None
+
+    # ------------------------------------------------------------------
     # 5. Optimizer and scheduler
     # ------------------------------------------------------------------
     # Separate parameter groups: gene_embed_proj gets lower lr to preserve
@@ -828,7 +857,7 @@ def train(cfg):
                         score = ds_metrics["pearson_delta_top20"]
                         all_scores.append(score)
                         logger.info(
-                            f"  [{ds_name}] P_d_all={score:.4f}, "
+                            f"  [{ds_name}] P_d_all={ds_metrics['pearson_delta_all']:.4f}, "
                             f"P_d_top20={ds_metrics['pearson_delta_top20']:.4f}, "
                             f"dir_acc={ds_metrics['direction_accuracy']:.4f}"
                         )
