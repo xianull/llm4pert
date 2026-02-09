@@ -268,6 +268,7 @@ class DyGenePT(nn.Module):
             num_facets=actual_k,
             dropout=cfg.cross_attention.dropout,
             topk=topk,
+            adapter_bottleneck=int(getattr(cfg.cross_attention, 'adapter_bottleneck', 512)),
         )
         # Register genome facets as frozen buffer inside cross_attention
         self.cross_attention.register_buffer('_genome_facets', aligned_facets)
@@ -282,6 +283,7 @@ class DyGenePT(nn.Module):
             gate_hidden_dims=gate_hidden,
             effect_dim=effect_dim,
             gene_facet_tensor=aligned_facets,
+            cross_gene_dim=int(getattr(cfg.decoder, 'cross_gene_dim', 512)),
         )
 
         # No perturbation type embedding in v2 (CRISPRi only)

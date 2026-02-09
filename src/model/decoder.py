@@ -225,6 +225,7 @@ class PerturbationDecoderV2(nn.Module):
         impact_summary_dim: int = 256,
         effect_dim: int = 512,
         gene_facet_tensor: torch.Tensor = None,
+        cross_gene_dim: int = 512,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -297,9 +298,6 @@ class PerturbationDecoderV2(nn.Module):
         )
 
         # Cross-gene MLP (GEARS-inspired): captures inter-gene dependencies
-        # After per-gene predictions, this learns "if gene A goes up,
-        # gene B should go down" type of cross-gene effects.
-        cross_gene_dim = 512
         self.cross_gene_mlp = nn.Sequential(
             nn.Linear(num_genes, cross_gene_dim),
             nn.GELU(),
@@ -344,11 +342,11 @@ class PerturbationDecoderV2(nn.Module):
         # Factored gene-level prediction: effect @ gene_emb.T
         if self._has_gene_emb:
             gene_emb = self.gene_embed_proj(self._gene_mean)               # (G, effect_dim)
-            # Normalized dot product with learnable temperature
-            effect_norm = nn.functional.normalize(effect, dim=-1)           # (B, effect_dim)
+            # Gene embeddings normalized for stable directions;
+            # effect keeps magnitude to encode perturbation strength
             gene_emb_norm = nn.functional.normalize(gene_emb, dim=-1)      # (G, effect_dim)
             # Hybrid: semantic factored (gene_emb) + per-gene learnable
-            factored = effect_norm @ gene_emb_norm.t()                      # (B, G) semantic
+            factored = effect @ gene_emb_norm.t()                           # (B, G) magnitude-aware
             per_gene = (effect.unsqueeze(1) * self.per_gene_weight.unsqueeze(0)).sum(-1)  # (B, G) free
             factored_delta = self.logit_scale * (factored + per_gene) + self.gene_bias
         else:

@@ -58,6 +58,67 @@ def is_main_process(rank: int) -> bool:
 # =====================================================================
 # Loss function
 # =====================================================================
+def _differentiable_pearson_loss(
+    pred: torch.Tensor,           # (B, G)
+    target: torch.Tensor,         # (B, G)
+    ctrl: torch.Tensor,           # (B, G)
+    de_idx: torch.LongTensor,    # (B, top_de)
+    de_idx_len: torch.LongTensor, # (B,)
+) -> torch.Tensor:
+    """Differentiable 1 - Pearson correlation on top-DE delta genes.
+
+    Computes per-sample Pearson correlation between predicted and true
+    delta vectors restricted to the known top-DE gene indices, then
+    returns 1 - mean(r) as a loss (lower is better).
+    """
+    B, G = pred.shape
+    device = pred.device
+
+    de_idx_clamped = de_idx.clamp(0, G - 1)
+
+    pred_delta = pred - ctrl
+    true_delta = target - ctrl
+
+    # Gather DE gene deltas: (B, top_de)
+    pred_de = pred_delta.gather(1, de_idx_clamped)
+    true_de = true_delta.gather(1, de_idx_clamped)
+
+    # Build mask for valid DE positions
+    mask = torch.arange(de_idx.shape[1], device=device).unsqueeze(0)
+    mask = (mask < de_idx_len.unsqueeze(1)).float()  # (B, top_de)
+
+    # Skip samples with fewer than 2 valid DE genes
+    valid_counts = mask.sum(dim=1)  # (B,)
+    valid_samples = valid_counts >= 2  # (B,)
+
+    if valid_samples.sum() == 0:
+        return torch.tensor(0.0, device=device)
+
+    # Masked mean for each sample
+    pred_masked = pred_de * mask
+    true_masked = true_de * mask
+
+    n = valid_counts.clamp(min=1)  # (B,)
+    pred_mean = pred_masked.sum(dim=1) / n  # (B,)
+    true_mean = true_masked.sum(dim=1) / n  # (B,)
+
+    # Center
+    pred_centered = (pred_de - pred_mean.unsqueeze(1)) * mask  # (B, top_de)
+    true_centered = (true_de - true_mean.unsqueeze(1)) * mask  # (B, top_de)
+
+    # Covariance and standard deviations
+    cov = (pred_centered * true_centered).sum(dim=1)  # (B,)
+    pred_std = (pred_centered ** 2).sum(dim=1).clamp(min=1e-8).sqrt()  # (B,)
+    true_std = (true_centered ** 2).sum(dim=1).clamp(min=1e-8).sqrt()  # (B,)
+
+    # Pearson r per sample
+    r = cov / (pred_std * true_std + 1e-8)  # (B,)
+
+    # Loss = 1 - mean(r) over valid samples only
+    loss = 1.0 - r[valid_samples].mean()
+    return loss
+
+
 def compute_loss(
     pred: torch.Tensor,          # (B, G)
     target: torch.Tensor,        # (B, G)
@@ -68,6 +129,7 @@ def compute_loss(
     de_mse_weight: float = 0.5,
     direction_weight: float = 0.1,
     rank_weight: float = 0.0,
+    pearson_weight: float = 0.0,
     autofocus_gamma: float = 0.0,
 ) -> dict:
     """Combined loss with GEARS-style autofocus and direction components.
@@ -130,15 +192,24 @@ def compute_loss(
     else:
         loss_rank = torch.tensor(0.0, device=device)
 
+    # --- Pearson correlation loss on top-DE delta (optional) ---
+    if pearson_weight > 0 and de_idx_len.sum() > 0:
+        loss_pearson = _differentiable_pearson_loss(
+            pred, target, ctrl_expression, de_idx, de_idx_len
+        )
+    else:
+        loss_pearson = torch.tensor(0.0, device=device)
+
     total = (
         mse_weight * loss_mse
         + de_mse_weight * loss_de_mse
         + direction_weight * loss_dir
         + rank_weight * loss_rank
+        + pearson_weight * loss_pearson
     )
     return {
         "total": total, "mse": loss_mse, "de_mse": loss_de_mse,
-        "direction": loss_dir, "rank": loss_rank,
+        "direction": loss_dir, "rank": loss_rank, "pearson": loss_pearson,
     }
 
 
@@ -689,6 +760,7 @@ def train(cfg):
                 de_mse_weight=cfg.training.loss.de_mse_weight,
                 direction_weight=cfg.training.loss.direction_weight,
                 rank_weight=float(getattr(cfg.training.loss, 'rank_weight', 0.0)),
+                pearson_weight=float(getattr(cfg.training.loss, 'pearson_weight', 0.0)),
                 autofocus_gamma=float(getattr(cfg.training.loss, 'autofocus_gamma', 0.0)),
             )
 
@@ -753,7 +825,7 @@ def train(cfg):
                             raw_model, ds, device, cfg, collate_perturbation_batch,
                             subgroup=None, train_pert_genes=train_pert_genes,
                         )
-                        score = ds_metrics["pearson_delta_all"]
+                        score = ds_metrics["pearson_delta_top20"]
                         all_scores.append(score)
                         logger.info(
                             f"  [{ds_name}] P_d_all={score:.4f}, "
@@ -814,7 +886,7 @@ def train(cfg):
                     wandb.log({f"val/{k}": v for k, v in val_metrics.items()})
 
                 # Save best model (select by pearson_delta_all, higher is better)
-                val_score = val_metrics["pearson_delta_all"]
+                val_score = val_metrics["pearson_delta_top20"]
                 if val_score > best_val_score:
                     best_val_score = val_score
                     patience_counter = 0
@@ -822,7 +894,7 @@ def train(cfg):
                     torch.save(
                         raw_model.state_dict(), ckpt_path
                     )
-                    logger.info(f"New best model saved (pearson_delta_all={best_val_score:.4f})")
+                    logger.info(f"New best model saved (pearson_delta_top20={best_val_score:.4f})")
                     if use_wandb:
                         import wandb
                         wandb.save(str(ckpt_path), base_path=str(output_dir))

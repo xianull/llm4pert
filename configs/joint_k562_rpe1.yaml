@@ -106,6 +106,7 @@ cross_attention:
   hidden_dim: 768
   dropout: 0.1
   topk: 0
+  adapter_bottleneck: 512             # facet adapter: facet_dim → bottleneck → embed_dim
 
 # ========================
 # Perturbation Type (disabled — CRISPRi only)
@@ -129,6 +130,7 @@ decoder:
   gene_embed_lr_scale: 0.1
   use_gene_graph: false
   num_go_layers: 2
+  cross_gene_dim: 512                 # cross-gene MLP hidden dim
 
 # ========================
 # Training — Joint K562 + RPE1
@@ -140,22 +142,23 @@ training:
     - replogle_rpe1_essential
   dataset: "replogle_k562_essential"  # fallback for single-dataset mode
   seed: 42
-  epochs: 30
+  epochs: 50
   batch_size: 128
-  lr: 1.0e-4
+  lr: 5.0e-5
   weight_decay: 1.0e-5
   scheduler: "cosine"
-  warmup_steps: 500
+  warmup_steps: 1000
   gradient_clip: 1.0
   eval_every: 1
   save_best: true
-  early_stopping_patience: 8
+  early_stopping_patience: 12
   loss:
-    mse_weight: 3.0              # UP: autofocus 主力 (was 1.0)
-    de_mse_weight: 5.0           # UP: DE 基因强聚焦 (was 2.0)
-    direction_weight: 0.1        # DOWN: 已饱和，减少梯度浪费 (was 1.0)
-    rank_weight: 0.5             # 启用排序 loss (was 0)
-    autofocus_gamma: 2.0         # UP: error^4，更强聚焦 DE (was 1.0)
+    mse_weight: 2.0              # rebalanced for pearson loss
+    de_mse_weight: 3.0           # DE 基因聚焦
+    direction_weight: 0.1        # 方向 loss
+    rank_weight: 0.3             # 排序 loss
+    pearson_weight: 3.0          # NEW: 直接优化目标指标
+    autofocus_gamma: 2.0         # error^4 聚焦 DE
   pert_gene_dropout: 0.0
   cross_validation:
     enabled: false
